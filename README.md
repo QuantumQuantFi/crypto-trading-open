@@ -67,12 +67,12 @@
 ├── 💹 刷量交易系统 (Volume Maker)
 │   ├── 挂单模式              # 限价单刷量（Backpack）
 │   └── 市价模式              # 市价单快速刷量（Lighter）
-├── 🔄 套利监控系统 (Arbitrage Monitor)
-│   ├── 基础模式套利          # 简单价差监控和执行
-│   ├── 分段套利系统          # 高级分段执行策略
+├── 🔄 套利监控与执行系统 (Arbitrage Monitor & Execution)
+│   ├── 基础模式套利          # 历史数据决策 + 自动执行
+│   ├── 分段套利系统          # 高级分段执行策略（网格模式）
 │   ├── 价格监控              # 实时价格差监控
 │   ├── 资金费率监控          # 跨交易所费率差异
-│   ├── 套利机会识别          # 价差和费率套利
+│   ├── 套利机会识别与执行    # 价差和费率套利自动执行
 │   ├── 终端 UI              # Rich 实时监控界面
 │   └── 交易对自动发现        # 多交易所交易对匹配
 ├── 🔔 价格提醒系统 (Price Alert)
@@ -174,20 +174,20 @@ python3 run_volume_maker.py config/volume_maker/backpack_btc_volume_maker.yaml
 python3 run_lighter_volume_maker.py config/volume_maker/lighter_volume_maker.yaml
 ```
 
-#### 套利监控系统
+#### 套利监控与执行系统
 ```bash
-# 基础模式套利监控
+# 基础模式套利（历史数据决策 + 自动执行）
 python3 run_arbitrage_monitor.py
 
-# 套利监控 V2
+# 套利系统 V2（增强监控 + 执行）
 python3 run_arbitrage_monitor_v2.py
 
-# 分段套利系统（推荐）
+# 分段套利系统（网格模式，推荐）
 python3 main_unified.py \
   --config config/arbitrage/arbitrage_segmented.yaml \
   --monitor-config config/arbitrage/monitor_v2.yaml
 
-# 单独监控模式
+# 单独监控模式（仅监控，不执行）
 python3 main_unified.py \
   --monitor-config config/arbitrage/monitor_lighter_gold.yaml
 
@@ -334,13 +334,13 @@ python3 run_lighter_volume_maker.py config/volume_maker/lighter_volume_maker.yam
 | `core/services/volume_maker/terminal_ui.py` | 刷量系统终端 UI |
 | `core/services/volume_maker/hourly_statistics.py` | 小时统计模块 |
 
-### 3️⃣ 套利监控系统
+### 3️⃣ 套利监控与执行系统
 
 #### 功能特性
 
 - **双模式支持**：基础模式和分段模式
-- **基础模式**：简单直接的价差监控和套利执行
-- **分段模式**：高级分段执行策略，降低滑点和市场冲击
+- **基础模式**：基于历史数据的决策引擎 + 自动套利执行
+- **分段模式**：高级分段网格执行策略，降低滑点和市场冲击
   - 支持 SEG-GRID（分段网格）、SEG-SCALP（分段剥头皮）、SEG-GRID+（分段拆单）三种模式
   - 统一决策引擎：总量驱动算法（target - actual = delta）
   - 支持多交易对独立配置、多腿套利、多交易所套利
@@ -400,16 +400,18 @@ python3 main_unified.py \
 
 | 文件路径 | 说明 |
 |---------|------|
-| `run_arbitrage_monitor.py` | 基础套利监控系统启动脚本 |
-| `run_arbitrage_monitor_v2.py` | 套利监控 V2 启动脚本 |
-| `main_unified.py` | 统一分段套利系统启动脚本 |
-| `core/services/arbitrage_monitor_v2/core/unified_orchestrator.py` | 统一调度器（支持多交易对） |
+| `run_arbitrage_monitor.py` | 基础套利系统启动脚本（监控+执行） |
+| `run_arbitrage_monitor_v2.py` | 套利系统 V2 启动脚本（增强版） |
+| `main_unified.py` | 统一分段套利系统启动脚本（网格模式） |
+| `core/services/arbitrage_monitor_v2/core/unified_orchestrator.py` | 统一调度器（监控+决策+执行） |
 | `core/services/arbitrage_monitor_v2/execution/arbitrage_executor.py` | 套利执行器（订单执行核心） |
 | `core/services/arbitrage_monitor_v2/execution/lighter_batch_executor.py` | Lighter 批量执行模块（WS批量+补单） |
 | `core/services/arbitrage_monitor_v2/decision/unified_decision_engine.py` | 统一决策引擎（总量驱动算法） |
+| `core/services/arbitrage_monitor_v2/decision/arbitrage_decision.py` | 基础模式决策引擎（历史数据分析） |
+| `core/services/arbitrage_monitor_v2/history/history_calculator.py` | 历史数据计算器（天然价差/资金费率差） |
 | `core/services/arbitrage_monitor_v2/utils/risk_control_utils.py` | 风控工具（流动性校验、价格稳定性） |
-| `core/services/arbitrage_monitor/implementations/arbitrage_monitor_impl.py` | 基础模式监控服务实现 |
-| `core/services/arbitrage_monitor/interfaces/arbitrage_monitor_service.py` | 监控服务接口 |
+| `core/services/arbitrage_monitor/implementations/arbitrage_monitor_impl.py` | 基础模式监控与执行服务实现 |
+| `core/services/arbitrage_monitor/interfaces/arbitrage_monitor_service.py` | 套利服务接口 |
 | `core/services/arbitrage_monitor/models/arbitrage_models.py` | 套利数据模型 |
 | `core/services/arbitrage_monitor/utils/symbol_converter.py` | 交易对转换器 |
 
@@ -566,11 +568,11 @@ crypto-trading/
 │   ├── run_grid_trading.py                # 网格交易系统启动
 │   ├── run_volume_maker.py                # 挂单刷量系统启动（Backpack）
 │   ├── run_lighter_volume_maker.py        # 市价刷量系统启动（Lighter）
-│   ├── run_arbitrage_monitor.py           # 基础套利监控系统启动
-│   ├── run_arbitrage_monitor_v2.py        # 套利监控系统 V2 启动
-│   ├── run_arbitrage_monitor_simple.py    # 简化套利监控系统启动
-│   ├── run_arbitrage_execution_v3.py      # 套利执行系统 V3 启动
-│   ├── main_unified.py                    # 统一分段套利系统启动
+│   ├── run_arbitrage_monitor.py           # 基础套利系统启动（监控+执行）
+│   ├── run_arbitrage_monitor_v2.py        # 套利系统 V2 启动（增强版）
+│   ├── run_arbitrage_monitor_simple.py    # 简化套利系统启动
+│   ├── run_arbitrage_execution_v3.py      # 套利执行系统 V3 启动（已废弃）
+│   ├── main_unified.py                    # 统一分段套利系统启动（网格模式）
 │   ├── run_price_alert.py                 # 价格提醒系统启动
 │   └── grid_volatility_scanner/
 │       └── run_scanner.py                 # 网格波动率扫描器启动
@@ -649,16 +651,16 @@ crypto-trading/
 │   │   │   │   └── volume_maker_statistics.py
 │   │   │   ├── hourly_statistics.py       # 小时统计
 │   │   │   └── terminal_ui.py             # 刷量系统终端 UI
-│   │   ├── arbitrage_monitor/ - 套利监控服务（基础版）
+│   │   ├── arbitrage_monitor/ - 套利监控与执行服务（基础版）
 │   │   │   ├── implementations/
-│   │   │   │   └── arbitrage_monitor_impl.py   # 监控服务实现
+│   │   │   │   └── arbitrage_monitor_impl.py   # 监控与执行服务实现
 │   │   │   ├── interfaces/
-│   │   │   │   └── arbitrage_monitor_service.py  # 监控服务接口
+│   │   │   │   └── arbitrage_monitor_service.py  # 套利服务接口
 │   │   │   ├── models/
 │   │   │   │   └── arbitrage_models.py    # 套利数据模型
 │   │   │   └── utils/
 │   │   │       └── symbol_converter.py    # 交易对转换器
-│   │   ├── arbitrage_monitor_v2/ - 套利监控服务 V2（分段版）
+│   │   ├── arbitrage_monitor_v2/ - 套利监控与执行服务 V2（分段版）
 │   │   │   ├── models.py                  # V2 数据模型
 │   │   │   ├── analysis/                  # 分析模块
 │   │   │   │   ├── exchange_locker.py     # 交易所锁定
@@ -673,22 +675,22 @@ crypto-trading/
 │   │   │   │   ├── multi_exchange_config.py   # 多交易所配置
 │   │   │   │   └── multi_leg_pairs_config.py  # 多腿配置
 │   │   │   ├── core/                      # 核心模块
-│   │   │   │   ├── unified_orchestrator.py       # 统一编排器（主力）
-│   │   │   │   ├── arbitrage_orchestrator_v3.py  # V3 编排器
+│   │   │   │   ├── unified_orchestrator.py       # 统一编排器（监控+决策+执行）
+│   │   │   │   ├── arbitrage_orchestrator_v3.py  # V3 编排器（多交易对支持）
 │   │   │   │   ├── orchestrator.py               # 基础编排器
-│   │   │   │   ├── orchestrator_simple.py        # 简单编排器
+│   │   │   │   ├── orchestrator_simple.py        # 简单编排器（轻量级）
 │   │   │   │   ├── orchestrator_bootstrap.py     # 启动引导器
 │   │   │   │   ├── orchestrator_ui_controller.py # UI 控制器
-│   │   │   │   ├── spread_pipeline.py            # 价差流水线
+│   │   │   │   ├── spread_pipeline.py            # 价差数据流水线
 │   │   │   │   ├── reduce_only_probe_service.py  # Reduce-Only 探测服务
-│   │   │   │   ├── health_monitor.py             # 健康监控
+│   │   │   │   ├── health_monitor.py             # 系统健康监控
 │   │   │   │   └── debug_state_printer.py        # 调试状态打印
 │   │   │   ├── data/                      # 数据模块
 │   │   │   │   ├── data_processor.py      # 数据处理器
 │   │   │   │   └── data_receiver.py       # 数据接收器
 │   │   │   ├── decision/                  # 决策模块
-│   │   │   │   ├── arbitrage_decision.py  # 套利决策
-│   │   │   │   └── unified_decision_engine.py  # 统一决策引擎
+│   │   │   │   ├── arbitrage_decision.py  # 基础模式决策引擎（历史数据分析）
+│   │   │   │   └── unified_decision_engine.py  # 统一决策引擎（总量驱动算法）
 │   │   │   ├── display/                   # 显示模块
 │   │   │   │   ├── ui_manager.py          # UI 管理器
 │   │   │   │   ├── realtime_scroller.py   # 实时滚动器
@@ -702,10 +704,10 @@ crypto-trading/
 │   │   │   │   └── reduce_only_handler.py # Reduce-Only 处理器
 │   │   │   ├── guards/                    # 守卫模块
 │   │   │   │   └── reduce_only_guard.py   # Reduce Only 守卫
-│   │   │   ├── history/                   # 历史模块
-│   │   │   │   ├── history_calculator.py  # 历史计算器
-│   │   │   │   ├── spread_history_recorder.py  # 价差历史记录
-│   │   │   │   ├── spread_history_reader.py    # 价差历史读取
+│   │   │   ├── history/                   # 历史数据模块
+│   │   │   │   ├── history_calculator.py  # 历史数据计算器（天然价差/资金费率差）
+│   │   │   │   ├── spread_history_recorder.py  # 价差历史记录器（持续采样）
+│   │   │   │   ├── spread_history_reader.py    # 价差历史读取器（查询接口）
 │   │   │   │   └── chart_generator.py     # 图表生成器
 │   │   │   ├── risk_control/              # 风控模块
 │   │   │   │   ├── global_risk_controller.py   # 全局风控
@@ -785,13 +787,13 @@ crypto-trading/
 │   ├── volume_maker/                      # 刷量配置
 │   │   ├── backpack_btc_volume_maker.yaml
 │   │   └── lighter_volume_maker.yaml
-│   ├── arbitrage/                         # 套利配置
-│   │   ├── monitor.yaml                   # 基础监控配置
-│   │   ├── monitor_v2.yaml                # V2 监控配置
-│   │   ├── monitor_lighter_gold.yaml      # Lighter 黄金监控
-│   │   ├── monitor_lighter_multi_btc.yaml # Lighter 多交易对
-│   │   ├── arbitrage_segmented.yaml       # 分段套利配置
-│   │   └── （其他监控配置）
+│   ├── arbitrage/                         # 套利系统配置
+│   │   ├── monitor.yaml                   # 基础模式配置
+│   │   ├── monitor_v2.yaml                # V2 模式配置
+│   │   ├── monitor_lighter_gold.yaml      # Lighter 黄金监控配置
+│   │   ├── monitor_lighter_multi_btc.yaml # Lighter 多交易对配置
+│   │   ├── arbitrage_segmented.yaml       # 分段套利执行配置
+│   │   └── （其他套利配置）
 │   ├── price_alert/                       # 价格提醒配置
 │   │   └── binance_alert.yaml
 │   ├── symbol_conversion.yaml             # 交易对转换配置
@@ -955,14 +957,14 @@ crypto-trading/
 | 市价模式 | `python3 run_lighter_volume_maker.py <配置文件>` | Lighter 市价刷量 |
 | 市价快速启动 | `./scripts/start_lighter_volume_maker.sh` | 快速启动 Lighter 刷量 |
 
-### 监控系统
+### 套利与监控系统
 
 | 脚本 | 命令 | 说明 |
 |------|------|------|
-| 基础套利监控 | `python3 run_arbitrage_monitor.py` | 基础模式套利监控 |
-| 套利监控 V2 | `python3 run_arbitrage_monitor_v2.py` | V2 版本套利监控 |
-| 分段套利系统 | `python3 main_unified.py --config <配置> --monitor-config <监控>` | 统一分段套利系统 |
-| 套利监控快速启动 | `./scripts/start_arbitrage_monitor.sh` | 快速启动套利监控 |
+| 基础套利系统 | `python3 run_arbitrage_monitor.py` | 基础模式（历史数据决策+执行） |
+| 套利系统 V2 | `python3 run_arbitrage_monitor_v2.py` | V2 版本（增强监控+执行） |
+| 分段套利系统 | `python3 main_unified.py --config <配置> --monitor-config <监控>` | 网格模式套利执行系统 |
+| 套利快速启动 | `./scripts/start_arbitrage_monitor.sh` | 快速启动套利系统 |
 | 价格提醒 | `python3 run_price_alert.py <配置文件>` | 启动价格提醒系统 |
 | 价格提醒快速启动 | `./scripts/start_price_alert.sh` | 快速启动价格提醒 |
 
@@ -1096,7 +1098,7 @@ API 层 (api/)
 - **[网格交易系统完整指南](docs/grid-trading/)** - 70+ 篇网格交易详细文档
 - **[网格波动率扫描器文档](grid_volatility_scanner/README.md)** - 扫描器使用指南
 - **[刷量系统文档](docs/volume-maker/)** - 42 篇刷量系统文档
-- **[套利监控系统文档](docs/arbitrage_monitor/)** - 10 篇套利监控文档
+- **[套利系统文档](docs/arbitrage_monitor/)** - 10 篇套利系统文档（监控+执行）
 - **[架构设计文档](docs/architecture/)** - 36 篇架构设计文档
 - **[Lighter 现货设置指南](LIGHTER_SPOT_SETUP.md)** - Lighter 现货快速开始
 - **[Lighter SDK 升级指南](docs/lighter_sdk_upgrade_guide.md)** - SDK 升级详细文档
