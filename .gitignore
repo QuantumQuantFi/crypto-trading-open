@@ -62,6 +62,7 @@ venv/
 venv-*/
 .venv/
 .venv-*/
+.venv-py*/
 .venv-lighter-spot
 ENV/
 env/
@@ -384,4 +385,3 @@ venv-py3*/
 # - *.example.json
 # - *.template
 # 这些文件不会被忽略
-
