@@ -90,6 +90,19 @@
    - 现象：某些交易所 `disconnect()` 会超时（例如 grvt/paradex），且仍可能出现 `Unclosed client session`（aiohttp session 未完全释放）。
    - 含义：在“大规模订阅 + 多适配器”场景下，退出路径更容易暴露“任务取消/连接释放不彻底”的边界问题，需作为后续稳定性修复项单独跟踪。
 
+### WS-only 45（降低规模）复测：OKX 启动限频 + 多所稳态延迟
+> 新增配置：`config/arbitrage/monitor_v2_ws_only_45.yaml`（从 90 币种裁剪到 45 币种，用于观察规模下降后的吞吐/延迟）
+
+- **目标**：验证“OKX 启动阶段的 REST 限频（50011）”是否可规避，并观察 8 所×45 币种是否仍出现秒级积压。
+- **OKX 修复点（简单可回溯）**：
+  - `OKXRest.initialize()` 在“无鉴权（仅公共行情监控）”场景默认不强制 `load_markets`，并设置更保守的 `ccxt.rateLimit` 与 50011 的 backoff（`core/adapters/exchanges/adapters/okx_rest.py`）。
+  - `OKXAdapter.subscribe_*()` 逻辑调整为“直接尝试 WS 订阅；失败时默认跳过（除非显式开启轮询 fallback）”，避免启动时因 `is_connected==False` 误判而为每个 symbol 启动 REST 轮询（`core/adapters/exchanges/adapters/okx.py`）。
+- **结果（一次运行样本，warmup=8s 后统计 35s）**：
+  - **OKX**：未再出现 `50011 Too Many Requests`；也未再出现“因轮询触发的 does not have market symbol”类 REST 错误刷屏。
+  - **订单簿**：稳态 `Q(ob)` 基本为 0；`delay_ms(ob p95)` 多数窗口在 **~25–55ms**，偶发抖动到 **~135ms**，`max` 约 **< 1s**（单次尖峰）。
+  - **Ticker**：预热阶段有明显长尾（启动 burst）；预热后 `delay_ms(tk p95)` 多数窗口在 **~30–72ms**，队列基本为 0。
+  - **丢弃**：统计窗口内 `drop(ob/tk)=0/0`（本次样本未触发队列丢弃策略）。
+
 ## 当前的说明（现状梳理）
 > 这一章是对“它用哪些代码如何实现、是否会触发 418、能否服务化”的当前实现说明。
 

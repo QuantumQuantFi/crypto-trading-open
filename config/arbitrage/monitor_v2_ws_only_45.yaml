@@ -1,0 +1,95 @@
+# ============================================================================
+# 套利监控系统配置 V2（性能/WS-only/45币种 测试用）
+#
+# 说明：
+# - WS-only：只选择“具备 WS 行情能力”的交易所，用于评估 WS 监听健康度
+# - Variational 当前为 REST 询价轮询（且容易触发 403/WAF），因此从该配置中剔除
+# - 该配置从 90 币种子集裁剪为 45 币种，用于观察“降低规模后”的吞吐/延迟变化
+# ============================================================================
+
+exchanges:
+  - edgex
+  - backpack
+  - lighter
+  - paradex
+  - hyperliquid
+  - binance
+  - okx
+  - grvt
+
+symbols:
+  - 0G-USDC-PERP
+  - 1000BONK-USDC-PERP
+  - 1000FLOKI-USDC-PERP
+  - 1000PEPE-USDC-PERP
+  - 1000SHIB-USDC-PERP
+  - 1000TOSHI-USDC-PERP
+  - 2Z-USDC-PERP
+  - AAVE-USDC-PERP
+  - ADA-USDC-PERP
+  - AERO-USDC-PERP
+  - AI16Z-USDC-PERP
+  - APEX-USDC-PERP
+  - APT-USDC-PERP
+  - ARB-USDC-PERP
+  - ASTER-USDC-PERP
+  - AVAX-USDC-PERP
+  - AVNT-USDC-PERP
+  - BCH-USDC-PERP
+  - BERA-USDC-PERP
+  - BNB-USDC-PERP
+  - BTC-USDC-PERP
+  - CC-USDC-PERP
+  - CRO-USDC-PERP
+  - CRV-USDC-PERP
+  - DOGE-USDC-PERP
+  - DOLO-USDC-PERP
+  - DOT-USDC-PERP
+  - DYDX-USDC-PERP
+  - EDEN-USDC-PERP
+  - EIGEN-USDC-PERP
+  - ENA-USDC-PERP
+  - ETH-USDC-PERP
+  - ETHFI-USDC-PERP
+  - FARTCOIN-USDC-PERP
+  - FF-USDC-PERP
+  - FIL-USDC-PERP
+  - GMX-USDC-PERP
+  - GRASS-USDC-PERP
+  - HBAR-USDC-PERP
+  - HYPE-USDC-PERP
+  - ICP-USDC-PERP
+  - IP-USDC-PERP
+  - JUP-USDC-PERP
+  - KAITO-USDC-PERP
+  - LAUNCHCOIN-USDC-PERP
+
+thresholds:
+  min_spread_pct: 0.1
+  min_funding_rate_diff: 0.01
+
+websocket:
+  ping_interval: 30
+  reconnect_delay: 5
+  max_reconnect_attempts: 5
+
+queues:
+  orderbook_queue_size: 20000
+  ticker_queue_size: 10000
+  analysis_queue_size: 500
+
+performance:
+  analysis_interval_ms: 10
+  ui_refresh_interval_ms: 1000
+
+health_check:
+  interval: 10
+  data_timeout: 30
+
+spread_history:
+  enabled: false
+
+debug_cli:
+  enabled: false
+  interval_seconds: 1.0
+

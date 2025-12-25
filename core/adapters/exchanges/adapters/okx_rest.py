@@ -35,28 +35,46 @@ class OKXRest(OKXBase):
         # 重试配置
         self.max_retries = 3
         self.retry_delay = 1.0
+
+        extra_params = getattr(config, "extra_params", {}) or {}
+        has_auth = bool(getattr(config, "api_key", "") or getattr(config, "api_secret", "") or getattr(config, "private_key", ""))
+        default_startup_load_markets = has_auth  # 无鉴权的公开行情监控优先走 WS，启动时不强制 markets
+        self._startup_load_markets = bool(extra_params.get("startup_load_markets", default_startup_load_markets))
+        self._startup_fetch_time = bool(extra_params.get("startup_fetch_time", True))
+        self._ccxt_rate_limit_ms = int(extra_params.get("ccxt_rate_limit_ms", 500))
+
+        # ccxt 不是线程安全的：用锁串行化所有请求，避免并发触发限频/竞态
+        self._ccxt_lock = asyncio.Lock()
         
     async def initialize(self) -> bool:
         """初始化CCXT交易所实例"""
         try:
             # 创建ccxt交易所实例
             self.exchange = ccxt.okx(self.ccxt_config)
+
+            # OKX 官方 REST 有较严格的限频要求：启动阶段做一次“保守限频”以避免 50011
+            # ccxt 会基于 rateLimit 做内部节流（包括 load_markets 内部的多次请求）
+            try:
+                self.exchange.enableRateLimit = True
+                self.exchange.rateLimit = max(int(self._ccxt_rate_limit_ms), 50)
+            except Exception:
+                pass
             
-            # 加载市场信息
-            await asyncio.get_event_loop().run_in_executor(
-                None, self.exchange.load_markets
-            )
-            
-            # 缓存市场信息
-            self._market_info = self.exchange.markets
-            
-            # 测试API连接
-            await asyncio.get_event_loop().run_in_executor(
-                None, self.exchange.fetch_time
-            )
+            # 加载市场信息（可通过 config/exchanges/okx_config.yaml 的 extra_params 关闭）
+            if self._startup_load_markets:
+                await self._execute_with_retry(self.exchange.load_markets)
+                self._market_info = self.exchange.markets
+            else:
+                self._market_info = {}
+                if self.logger:
+                    self.logger.info("ℹ️ OKX REST 启动阶段跳过 load_markets（监控/WS-only 模式）")
+
+            # 测试API连接（可关闭，避免启动阶段额外 REST）
+            if self._startup_fetch_time:
+                await self._execute_with_retry(self.exchange.fetch_time)
             
             if self.logger:
-                self.logger.info(f"✅ OKX REST初始化成功，加载 {len(self.exchange.markets)} 个市场")
+                self.logger.info(f"✅ OKX REST初始化成功，加载 {len(self._market_info)} 个市场")
             return True
             
         except Exception as e:
@@ -76,16 +94,22 @@ class OKXRest(OKXBase):
         
         for attempt in range(self.max_retries):
             try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, func, *args, **kwargs
-                )
-                return result
+                async with self._ccxt_lock:
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None, func, *args, **kwargs
+                    )
+                    return result
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries - 1:
                     if self.logger:
                         self.logger.warning(f"API调用失败 (尝试 {attempt + 1}/{self.max_retries}): {str(e)}")
-                    await asyncio.sleep(self.retry_delay * (attempt + 1))
+                    # OKX 50011/Too Many Requests：按照官方限频要求做更长 backoff
+                    msg = str(e)
+                    if "50011" in msg or "Too Many Requests" in msg or "rate limit" in msg.lower():
+                        await asyncio.sleep(max(self.retry_delay * (attempt + 1), 2.0 * (attempt + 1)))
+                    else:
+                        await asyncio.sleep(self.retry_delay * (attempt + 1))
                 else:
                     if self.logger:
                         self.logger.error(f"API调用最终失败: {str(e)}")

@@ -71,8 +71,8 @@ class OKXAdapter(ExchangeAdapter):
             # 初始化REST API
             rest_success = await self._rest.initialize()
             if not rest_success:
-                self.logger.error("❌ OKX REST API初始化失败")
-                return False
+                # 公开行情监控以 WS 为主：REST 初始化失败不应阻断整体启动
+                self.logger.warning("⚠️ OKX REST API初始化失败（继续尝试使用 WebSocket 公共行情）")
             
             # 初始化WebSocket
             ws_success = await self._websocket.initialize()
@@ -80,7 +80,7 @@ class OKXAdapter(ExchangeAdapter):
                 self.logger.warning("⚠️ OKX WebSocket初始化失败，仅使用REST API")
             
             # 缓存市场信息
-            self._market_info = self._rest._market_info
+            self._market_info = getattr(self._rest, "_market_info", {}) or {}
             
             self.logger.info(f"✅ OKX连接成功，加载 {len(self._market_info)} 个市场")
             return True
@@ -261,35 +261,41 @@ class OKXAdapter(ExchangeAdapter):
     async def subscribe_ticker(self, symbol: str, callback: Callable[[TickerData], None]) -> None:
         """订阅行情数据流"""
         try:
-            if self._websocket.is_connected:
-                await self._websocket.subscribe_ticker(symbol, callback)
-            else:
-                self.logger.warning(f"⚠️ WebSocket未连接，使用轮询模式订阅行情 {symbol}")
-                asyncio.create_task(self._poll_ticker(symbol, callback))
+            await self._websocket.subscribe_ticker(symbol, callback)
         except Exception as e:
-            self.logger.error(f"❌ 订阅行情失败 {symbol}: {e}")
+            self.logger.warning(f"⚠️ OKX WebSocket订阅行情失败 {symbol}: {e}")
+            allow_polling = bool((getattr(self.config, "extra_params", {}) or {}).get("allow_polling_fallback", False))
+            if allow_polling:
+                self.logger.warning(f"⚠️ 使用轮询模式订阅行情 {symbol}")
+                asyncio.create_task(self._poll_ticker(symbol, callback))
+            else:
+                self.logger.warning(f"⏭️ 跳过 {symbol}（WS订阅失败且禁用轮询 fallback）")
 
     async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBookData], None]) -> None:
         """订阅订单簿数据流"""
         try:
-            if self._websocket.is_connected:
-                await self._websocket.subscribe_orderbook(symbol, callback)
-            else:
-                self.logger.warning(f"⚠️ WebSocket未连接，使用轮询模式订阅订单簿 {symbol}")
-                asyncio.create_task(self._poll_orderbook(symbol, callback))
+            await self._websocket.subscribe_orderbook(symbol, callback)
         except Exception as e:
-            self.logger.error(f"❌ 订阅订单簿失败 {symbol}: {e}")
+            self.logger.warning(f"⚠️ OKX WebSocket订阅订单簿失败 {symbol}: {e}")
+            allow_polling = bool((getattr(self.config, "extra_params", {}) or {}).get("allow_polling_fallback", False))
+            if allow_polling:
+                self.logger.warning(f"⚠️ 使用轮询模式订阅订单簿 {symbol}")
+                asyncio.create_task(self._poll_orderbook(symbol, callback))
+            else:
+                self.logger.warning(f"⏭️ 跳过 {symbol}（WS订阅失败且禁用轮询 fallback）")
 
     async def subscribe_trades(self, symbol: str, callback: Callable[[TradeData], None]) -> None:
         """订阅成交数据流"""
         try:
-            if self._websocket.is_connected:
-                await self._websocket.subscribe_trades(symbol, callback)
-            else:
-                self.logger.warning(f"⚠️ WebSocket未连接，使用轮询模式订阅成交 {symbol}")
-                asyncio.create_task(self._poll_trades(symbol, callback))
+            await self._websocket.subscribe_trades(symbol, callback)
         except Exception as e:
-            self.logger.error(f"❌ 订阅成交失败 {symbol}: {e}")
+            self.logger.warning(f"⚠️ OKX WebSocket订阅成交失败 {symbol}: {e}")
+            allow_polling = bool((getattr(self.config, "extra_params", {}) or {}).get("allow_polling_fallback", False))
+            if allow_polling:
+                self.logger.warning(f"⚠️ 使用轮询模式订阅成交 {symbol}")
+                asyncio.create_task(self._poll_trades(symbol, callback))
+            else:
+                self.logger.warning(f"⏭️ 跳过 {symbol}（WS订阅失败且禁用轮询 fallback）")
 
     async def subscribe_user_data(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         """订阅用户数据流"""
