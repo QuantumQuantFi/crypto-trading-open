@@ -153,6 +153,33 @@ Monitor/V2 具备异步历史记录能力（避免阻塞主链路）：
 - 明确“写盘频率/字段/保留策略”，保证写盘压力与实时链路隔离。
 - 在不需要资金费率等信息时允许跳过部分元数据加载；需要时在启动阶段慢速补齐一次并缓存。
 
+## 9. 后续实施计划：对外端口 + 动态 watchlist（FR_monitor 联动）
+> 目标：把 Monitor/V2 变成“可被其它服务调用的数据源”，同时支持外部动态下发关注币种，并按 24h TTL 自动维护订阅生命周期。
+
+### 9.1 对外数据端口（第一优先级）
+- 形式：FastAPI（HTTP + 可选 WebSocket stream），Headless 后台运行 orchestrator
+- 最小可用接口（MVP）：
+  - `GET /health`：运行状态、各交易所连接状态、队列积压/丢弃、处理延迟分位数
+  - `GET /snapshot`：返回 `exchange+symbol` 的最新 BBO、时间戳链路、价差/机会（可按参数过滤）
+
+### 9.2 动态 watchlist 端口（第二优先级）
+- 需求：FR_monitor 把“发现的币种/交易所”发给本服务，本服务开始订阅并持续 24h；若同一交易所再次触发则延长存活时间。
+- 建议接口（MVP）：
+  - `POST /watchlist/add`：按 `symbol`（可选指定 `exchanges`）新增关注，并设置 `ttl_seconds`（默认 86400）
+  - `POST /watchlist/touch`：按 `(exchange, symbol)` 延长 TTL（用于“同交易所再次触发则续命”）
+  - `POST /watchlist/remove`：手动结束关注（可选指定 exchanges）
+  - `GET /watchlist`：查看当前关注列表、到期时间、剩余 TTL、订阅状态
+
+### 9.3 生命周期与订阅策略（避免 90 币种下的订阅/回退风暴）
+- 关注粒度：以 `(exchange, symbol)` 为单位维护 `expire_at`（满足“同交易所触发才延寿”）
+- 自动回收：后台任务周期性清理过期项，并尝试 `unsubscribe`（若交易所不支持 unsubscribe，则至少“停止入队/停止参与分析”）
+- WS-only 原则：默认不允许“WS 短暂断开就回退 REST 轮询”，避免规模场景下 I/O 风暴（OKX 已验证）
+- 订阅并发控制：动态新增时按交易所分批/限速订阅，避免握手风暴（Binance 已验证）
+
+### 9.4 状态持久化（建议尽早加，避免重启丢关注）
+- watchlist 持久化：SQLite（同库或单独表），重启时恢复未过期条目并自动重新订阅
+- 价差/资金费率历史：沿用现有 `SpreadHistoryRecorder` 的异步写盘策略
+
 ## 附录 A：安全审计结论（仓库后门/密钥外传视角）
 > 目的：回答“这个仓库是否存在把 API Key/私钥联网发给黑客”的后门风险。
 

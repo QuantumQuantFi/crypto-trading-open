@@ -64,11 +64,27 @@ class DataReceiver:
         
         # 适配器注册表
         self.adapters: Dict[str, Any] = {}
+
+        # 🔥 动态过滤（用于 watchlist/TTL）：(exchange, std_symbol) -> bool
+        # 默认 None 表示全部接收
+        self._should_accept: Optional[Callable[[str, str], bool]] = None
         
         # 🚀 Symbol转换器（参考V1）
         logger = logging.getLogger(__name__)
         self.symbol_converter = SimpleSymbolConverter(logger)
         logger.info("✅ Symbol转换器已初始化")
+
+    def set_should_accept(self, predicate: Optional[Callable[[str, str], bool]]) -> None:
+        """设置动态过滤函数（用于 watchlist/TTL）"""
+        self._should_accept = predicate
+
+    def _is_accepted(self, exchange: str, std_symbol: str) -> bool:
+        if self._should_accept is None:
+            return True
+        try:
+            return bool(self._should_accept(exchange, std_symbol))
+        except Exception:
+            return True
     
     def register_adapter(self, exchange: str, adapter: Any):
         """
@@ -138,8 +154,7 @@ class DataReceiver:
                                 # 如果转换失败，可能是已经是标准格式，直接使用
                                 std_symbol = orderbook.symbol
                             
-                            # 检查symbol是否在监控列表中
-                            if std_symbol in symbols:
+                            if self._is_accepted(_exchange_name, std_symbol):
                                 # 直接验证并入队
                                 try:
                                     # 验证数据
@@ -172,8 +187,7 @@ class DataReceiver:
                             # 转换symbol到标准格式
                             std_symbol = receiver_self.symbol_converter.convert_from_exchange(ticker.symbol, "lighter")
                             
-                            # 检查symbol是否在监控列表中
-                            if std_symbol in symbols:
+                            if receiver_self._is_accepted(_exchange_name, std_symbol):
                                 # 直接入队，避免二次符号转换（队列满时丢弃旧数据，保证实时性）
                                 try:
                                     receiver_self.ticker_queue.put_nowait({
@@ -256,8 +270,7 @@ class DataReceiver:
                             # 🔥 从symbol转换为标准格式
                             std_symbol = self.symbol_converter.convert_from_exchange(symbol, _exchange_name)
                             
-                            # 🔥 检查symbol是否在监控列表中
-                            if std_symbol in symbols:
+                            if self._is_accepted(_exchange_name, std_symbol):
                                 # 调用标准回调（需要symbol和orderbook两个参数）
                                 self._create_orderbook_callback(_exchange_name)(std_symbol, orderbook)
                         except Exception as e:
@@ -273,7 +286,7 @@ class DataReceiver:
                                 symbol, ticker = args
                                 # EdgeX 已经提供了symbol，只需要转换
                                 std_symbol = self.symbol_converter.convert_from_exchange(symbol, _exchange_name)
-                                if std_symbol in symbols:
+                                if self._is_accepted(_exchange_name, std_symbol):
                                     self._create_ticker_callback(_exchange_name)(std_symbol, ticker)
                         except Exception as e:
                             if self.debug.is_debug_enabled():
@@ -445,6 +458,10 @@ class DataReceiver:
             # 🚀 统一转换为标准符号（保证各层一致）
             std_symbol = self._normalize_symbol(symbol, exchange)
 
+            # 🔥 watchlist/TTL：未关注的 (exchange, symbol) 直接丢弃
+            if not self._is_accepted(exchange, std_symbol):
+                return
+
             # 🚀 快速验证（检查必需字段）
             # 所有交易所统一验证：必须同时有有效的bid和ask
             # （Backpack现在在适配器层维护完整的本地订单簿）
@@ -531,6 +548,9 @@ class DataReceiver:
 
             # 🚀 统一转换为标准符号
             std_symbol = self._normalize_symbol(symbol, exchange)
+
+            if not self._is_accepted(exchange, std_symbol):
+                return
 
             # 🚀 立即入队（非阻塞）
             try:

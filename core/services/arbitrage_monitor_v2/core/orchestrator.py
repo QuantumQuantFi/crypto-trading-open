@@ -9,6 +9,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -44,7 +45,8 @@ class ArbitrageOrchestrator:
     def __init__(
         self,
         config_path: Optional[Path] = None,
-        debug_config: Optional[DebugConfig] = None
+        debug_config: Optional[DebugConfig] = None,
+        enable_ui: bool = True,
     ):
         """
         初始化总调度器
@@ -57,6 +59,13 @@ class ArbitrageOrchestrator:
         self.config_manager = ConfigManager(config_path)
         self.config: MonitorConfig = self.config_manager.get_config()
         self.debug = debug_config or DebugConfig()
+        self.enable_ui = enable_ui
+
+        self._symbols_lock = asyncio.Lock()
+        self._latest_analysis_lock = asyncio.Lock()
+        self._latest_opportunities: List[dict] = []
+        self._latest_symbol_spreads: Dict[str, list] = {}
+        self._last_analysis_at: Optional[float] = None
         
         # 创建队列
         self.orderbook_queue = asyncio.Queue(maxsize=self.config.orderbook_queue_size)
@@ -89,10 +98,12 @@ class ArbitrageOrchestrator:
             scroller=self.scroller  # 🔥 传递滚动区管理器
         )
         
-        self.ui_manager = UIManager(
-            self.debug,
-            scroller=self.scroller  # 🔥 传递滚动区管理器
-        )
+        self.ui_manager: Optional[UIManager] = None
+        if self.enable_ui:
+            self.ui_manager = UIManager(
+                self.debug,
+                scroller=self.scroller  # 🔥 传递滚动区管理器
+            )
         
         self.health_monitor = HealthMonitor(
             data_timeout_seconds=self.config.data_timeout_seconds
@@ -133,6 +144,25 @@ class ArbitrageOrchestrator:
         self.running = False
         
         print("✅ 套利监控系统初始化完成")
+
+    async def set_symbols(self, symbols: List[str]) -> None:
+        """动态更新监控 symbols（用于 headless/watchlist 场景）"""
+        async with self._symbols_lock:
+            self.config.symbols = list(dict.fromkeys(symbols))  # 去重并保持顺序
+        if self.ui_manager:
+            self.ui_manager.update_config({
+                'exchanges': self.config.exchanges,
+                'symbols': self.config.symbols
+            })
+
+    async def get_latest_analysis(self) -> Dict[str, object]:
+        """获取最近一次分析产物（适用于对外 API）"""
+        async with self._latest_analysis_lock:
+            return {
+                'opportunities': list(self._latest_opportunities),
+                'symbol_spreads': dict(self._latest_symbol_spreads),
+                'last_analysis_at': self._last_analysis_at,
+            }
     
     async def start(self):
         """启动系统"""
@@ -166,22 +196,24 @@ class ArbitrageOrchestrator:
         # 4. 启动健康监控
         await self.health_monitor.start(self.config.health_check_interval)
         
-        # 5. 🔥 混合模式：启动UI（不清屏，让顶部 print() 滚动显示）
-        self.ui_manager.start(refresh_rate=5)
-        
-        # 5.5. 更新UI配置（让UI知道exchanges和symbols）
-        self.ui_manager.update_config({
-            'exchanges': self.config.exchanges,
-            'symbols': self.config.symbols
-        })
+        if self.ui_manager:
+            # 5. 🔥 混合模式：启动UI（不清屏，让顶部 print() 滚动显示）
+            self.ui_manager.start(refresh_rate=5)
+            
+            # 5.5. 更新UI配置（让UI知道exchanges和symbols）
+            self.ui_manager.update_config({
+                'exchanges': self.config.exchanges,
+                'symbols': self.config.symbols
+            })
         
         # 6. 启动分析任务
         self.tasks.append(asyncio.create_task(self._analysis_loop()))
         
-        # 7. 启动UI更新任务
-        self.tasks.append(asyncio.create_task(
-            self.ui_manager.update_loop(self.config.ui_refresh_interval_ms)
-        ))
+        if self.ui_manager:
+            # 7. 启动UI更新任务
+            self.tasks.append(asyncio.create_task(
+                self.ui_manager.update_loop(self.config.ui_refresh_interval_ms)
+            ))
         
         print("🚀 套利监控系统已启动")
         print(f"📊 监控交易所: {', '.join(self.config.exchanges)}")
@@ -215,7 +247,8 @@ class ArbitrageOrchestrator:
         # 停止各个模块
         await self.data_processor.stop()
         await self.health_monitor.stop()
-        self.ui_manager.stop()
+        if self.ui_manager:
+            self.ui_manager.stop()
         await self.data_receiver.cleanup()
         
         print("✅ 套利监控系统已停止")
@@ -367,11 +400,15 @@ class ArbitrageOrchestrator:
                     all_tickers = self.data_processor.get_all_tickers()
                     
                     # 遍历所有交易对
-                    all_opportunities = []
-                    # 🔥 保存每个交易对的最佳价差（用于UI表格显示，保证数据一致性）
-                    symbol_spreads: Dict[str, float] = {}  # {symbol: best_spread_pct}
+                    all_opportunities = []  # UI/内部使用（ArbitrageOpportunity 对象）
+                    all_opportunities_payload: List[Dict[str, object]] = []  # 对外 API 使用（可 JSON 化）
+                    # 🔥 保存每个交易对的价差列表（UI/对外 API 都可消费，UI 已兼容 dict）
+                    symbol_spreads: Dict[str, List[Dict[str, object]]] = {}
                     
-                    for symbol in self.config.symbols:
+                    async with self._symbols_lock:
+                        symbols_snapshot = list(self.config.symbols)
+
+                    for symbol in symbols_snapshot:
                         # 收集该交易对在各交易所的订单簿
                         orderbooks = {}
                         for exchange in self.config.exchanges:
@@ -388,14 +425,24 @@ class ArbitrageOrchestrator:
                         # 计算价差（现在包含所有价差，包括正负差价）
                         spreads = self.spread_calculator.calculate_spreads(symbol, orderbooks)
                         
-                        # 🔥 修改：保存所有价差数据（用于UI表格显示2个方向的价差）
+                        # 🔥 保存所有价差数据（用于UI或对外 API）
                         # 同一个代币可能有2个方向的价差，都需要显示
-                        if spreads:
-                            # 保存所有价差数据，格式：{symbol: [SpreadData, ...]}
-                            symbol_spreads[symbol] = spreads
-                        else:
-                            # 如果没有价差数据，设置为空列表
-                            symbol_spreads[symbol] = []
+                        symbol_spreads[symbol] = [
+                            {
+                                "symbol": s.symbol,
+                                "exchange_buy": s.exchange_buy,
+                                "exchange_sell": s.exchange_sell,
+                                "price_buy": float(s.price_buy),
+                                "price_sell": float(s.price_sell),
+                                "size_buy": float(s.size_buy),
+                                "size_sell": float(s.size_sell),
+                                "spread_abs": float(s.spread_abs),
+                                "spread_pct": float(s.spread_pct),
+                                "buy_symbol": s.buy_symbol,
+                                "sell_symbol": s.sell_symbol,
+                            }
+                            for s in (spreads or [])
+                        ]
                         
                         # 收集资金费率
                         funding_rates = {}
@@ -407,6 +454,27 @@ class ArbitrageOrchestrator:
                         # 识别机会
                         opportunities = self.opportunity_finder.find_opportunities(spreads, funding_rates)
                         all_opportunities.extend(opportunities)
+                        for opp in opportunities:
+                            all_opportunities_payload.append(
+                                {
+                                    "symbol": opp.symbol,
+                                    "exchange_buy": opp.exchange_buy,
+                                    "exchange_sell": opp.exchange_sell,
+                                    "price_buy": float(opp.price_buy),
+                                    "price_sell": float(opp.price_sell),
+                                    "size_buy": float(opp.size_buy),
+                                    "size_sell": float(opp.size_sell),
+                                    "spread_pct": float(opp.spread_pct),
+                                    "funding_rate_buy": opp.funding_rate_buy,
+                                    "funding_rate_sell": opp.funding_rate_sell,
+                                    "funding_rate_diff": opp.funding_rate_diff,
+                                    "duration_seconds": float(opp.duration_seconds),
+                                    "first_seen": opp.first_seen.timestamp() if opp.first_seen else None,
+                                    "last_seen": opp.last_seen.timestamp() if opp.last_seen else None,
+                                    "trigger_mode": opp.trigger_mode,
+                                    "trigger_condition": opp.trigger_condition,
+                                }
+                            )
                         
                         # 🔥 历史记录（非阻塞，只写入内存，性能影响 < 0.01ms）
                         # 🔥 修改：记录所有价差数据（包括正负差价），而不是只记录opportunities
@@ -438,31 +506,42 @@ class ArbitrageOrchestrator:
                                     'size_sell': float(spread.size_sell),
                                 })
                     
-                    # 更新UI（传递价差数据，保证数据一致性）
-                    self._update_ui(all_opportunities, symbol_spreads=symbol_spreads)
+                    async with self._latest_analysis_lock:
+                        self._latest_opportunities = list(all_opportunities_payload)
+                        self._latest_symbol_spreads = dict(symbol_spreads)
+                        self._last_analysis_at = time.time()
+
+                    if self.ui_manager:
+                        # 更新UI（传递价差数据，保证数据一致性）
+                        self._update_ui(all_opportunities, symbol_spreads=symbol_spreads)
                     
                     # 短暂休眠
                     await asyncio.sleep(self.config.analysis_interval_ms / 1000)
                     
                 except Exception as e:
-                    if self.debug.is_debug_enabled():
+                    if self.debug.is_debug_enabled() and self.ui_manager:
                         self.ui_manager.add_debug_message(f"❌ 分析错误: {e}")
+                    else:
+                        logger.warning("分析循环错误: %s", e, exc_info=self.debug.is_debug_enabled())
                     await asyncio.sleep(0.1)
                     
         except asyncio.CancelledError:
             # 🔥 UI模式下不打印，避免界面闪动（使用UI的debug消息）
             pass
         except Exception as e:
-            # 🔥 UI模式下使用debug消息，不直接print
-            self.ui_manager.add_debug_message(f"❌ 分析引擎错误: {e}")
+            if self.ui_manager:
+                # 🔥 UI模式下使用debug消息，不直接print
+                self.ui_manager.add_debug_message(f"❌ 分析引擎错误: {e}")
+            else:
+                logger.error("分析引擎错误: %s", e, exc_info=True)
     
-    def _update_ui(self, opportunities: List, symbol_spreads: Optional[Dict[str, float]] = None):
+    def _update_ui(self, opportunities: List, symbol_spreads: Optional[Dict[str, List[Dict[str, object]]]] = None):
         """
         更新UI数据（带节流，避免卡顿）
         
         Args:
             opportunities: 机会列表
-            symbol_spreads: 每个交易对的所有价差 {symbol: [SpreadData, ...]}（用于UI表格显示，保证数据一致性）
+            symbol_spreads: 每个交易对的价差列表 {symbol: [SpreadData|dict, ...]}（用于UI表格显示/对外一致性）
         """
         import time
         current_time = time.time()
