@@ -9,9 +9,11 @@
 
 import asyncio
 import time
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Deque
 from datetime import datetime
 from collections import defaultdict
+from collections import deque
+from statistics import mean
 
 from core.adapters.exchanges.models import OrderBookData, TickerData
 from core.adapters.exchanges.utils.setup_logging import LoggingConfig
@@ -76,6 +78,12 @@ class DataProcessor:
         # 队列峰值监控
         self.orderbook_queue_peak: int = 0
         self.ticker_queue_peak: int = 0
+
+        # 处理延迟统计（本地接收 -> 处理完成），用于衡量是否出现明显积压
+        # 仅保留最近 N 个样本，避免内存无限增长
+        self._delay_samples_maxlen = 5000
+        self._orderbook_delay_ms: Deque[float] = deque(maxlen=self._delay_samples_maxlen)
+        self._ticker_delay_ms: Deque[float] = deque(maxlen=self._delay_samples_maxlen)
         
         # 统计信息（滑动窗口：只统计过去1小时）
         # 🔥 使用时间戳列表记录每次处理的时间，实现滑动窗口统计
@@ -218,6 +226,14 @@ class DataProcessor:
         orderbook.received_timestamp = received_timestamp
         processed_at = datetime.now()
         orderbook.processed_timestamp = processed_at
+
+        # 处理延迟（ms）：入队时间(received_at) -> 处理时间
+        try:
+            delay_ms = (processed_at - received_timestamp).total_seconds() * 1000.0
+            if delay_ms >= 0:
+                self._orderbook_delay_ms.append(delay_ms)
+        except Exception:
+            pass
         
         # 🔥 记录处理时间戳（用于滑动窗口统计）
         current_time = time.time()
@@ -293,6 +309,15 @@ class DataProcessor:
         # 更新Ticker状态
         self.tickers[exchange][symbol] = ticker
         self.ticker_timestamps[exchange][symbol] = timestamp
+
+        # 处理延迟（ms）：入队时间 -> 处理时间
+        try:
+            processed_at = datetime.now()
+            delay_ms = (processed_at - timestamp).total_seconds() * 1000.0
+            if delay_ms >= 0:
+                self._ticker_delay_ms.append(delay_ms)
+        except Exception:
+            pass
         
         # 记录处理时间戳（用于滑动窗口统计）
         current_time = time.time()
@@ -453,6 +478,27 @@ class DataProcessor:
         if tk_qsize > self.ticker_queue_peak:
             self.ticker_queue_peak = tk_qsize
         
+        def _delay_stats(samples: Deque[float]) -> Dict[str, float]:
+            if not samples:
+                return {
+                    "avg_ms": 0.0,
+                    "p95_ms": 0.0,
+                    "max_ms": 0.0,
+                    "samples": 0,
+                }
+            data = list(samples)
+            data.sort()
+            p95_idx = max(0, int(len(data) * 0.95) - 1)
+            return {
+                "avg_ms": float(mean(data)),
+                "p95_ms": float(data[p95_idx]),
+                "max_ms": float(data[-1]),
+                "samples": float(len(data)),
+            }
+
+        ob_delay = _delay_stats(self._orderbook_delay_ms)
+        tk_delay = _delay_stats(self._ticker_delay_ms)
+
         return {
             **self.stats,
             'orderbook_processed': orderbook_processed,
@@ -463,6 +509,14 @@ class DataProcessor:
             'ticker_queue_peak': self.ticker_queue_peak,
             'orderbook_count': sum(len(obs) for obs in self.orderbooks.values()),
             'ticker_count': sum(len(tks) for tks in self.tickers.values()),
+            'orderbook_delay_avg_ms': ob_delay["avg_ms"],
+            'orderbook_delay_p95_ms': ob_delay["p95_ms"],
+            'orderbook_delay_max_ms': ob_delay["max_ms"],
+            'orderbook_delay_samples': int(ob_delay["samples"]),
+            'ticker_delay_avg_ms': tk_delay["avg_ms"],
+            'ticker_delay_p95_ms': tk_delay["p95_ms"],
+            'ticker_delay_max_ms': tk_delay["max_ms"],
+            'ticker_delay_samples': int(tk_delay["samples"]),
         }
     
     def is_data_available(self, exchange: str, symbol: str) -> bool:
@@ -479,4 +533,3 @@ class DataProcessor:
         has_orderbook = symbol in self.orderbooks.get(exchange, {})
         has_ticker = symbol in self.tickers.get(exchange, {})
         return has_orderbook  # Ticker是可选的
-

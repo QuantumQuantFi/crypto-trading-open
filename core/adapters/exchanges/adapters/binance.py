@@ -113,6 +113,11 @@ class BinanceAdapter(ExchangeAdapter):
     async def _do_disconnect(self) -> None:
         """断开连接实现"""
         try:
+            # 停止轮询任务（避免 close 后仍继续调用 REST 导致刷屏报错）
+            if not hasattr(self, "_stop_polling"):
+                self._stop_polling = set()
+            self._stop_polling.add("ALL")
+
             # 关闭REST连接
             await self._rest.close()
             
@@ -295,10 +300,15 @@ class BinanceAdapter(ExchangeAdapter):
     async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBookData], None]) -> None:
         """订阅订单簿数据流"""
         try:
-            if self._websocket.is_connected:
+            is_public_only = self.config.api_key == "public_data_only"
+            try:
                 await self._websocket.subscribe_orderbook(symbol, callback)
-            else:
-                self.logger.warning(f"⚠️ WebSocket未连接，使用轮询模式订阅订单簿 {symbol}")
+                self.logger.info(f"✅ WebSocket订阅成功: {symbol}")
+            except Exception as ws_error:
+                if is_public_only:
+                    self.logger.error(f"❌ WebSocket订阅失败（公开数据模式）: {symbol} - {ws_error}")
+                    raise
+                self.logger.warning(f"⚠️ WebSocket订阅失败，使用轮询模式订阅订单簿: {symbol} - {ws_error}")
                 asyncio.create_task(self._poll_orderbook(symbol, callback))
         except Exception as e:
             self.logger.error(f"❌ 订阅订单簿失败 {symbol}: {e}")

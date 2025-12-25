@@ -1,0 +1,17 @@
+okx:
+  name: "OKX"
+  exchange_type: "perpetual"
+  testnet: false
+
+  # 公开行情不需要密钥；如需交易/私有订阅可用环境变量覆盖
+  api_key: ""
+  api_secret: ""
+  api_passphrase: ""
+
+  # 可选：覆盖默认端点
+  # base_url: "https://www.okx.com"
+  # ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+  # private_ws_url: "wss://ws.okx.com:8443/ws/v5/private"
+
+  extra_params: {}
+

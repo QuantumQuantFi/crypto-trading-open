@@ -226,6 +226,17 @@ class GRVTAdapter(ExchangeAdapter):
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    async def _do_heartbeat(self) -> None:
+        """
+        心跳检测：
+        - Base 适配器会在 CONNECTED/AUTHENTICATED 状态下定期调用该方法
+        - 这里做一次轻量的公共行情请求，验证网络/端点可用性
+        """
+        if not self._supported_symbols:
+            await self._refresh_instruments()
+        sym = self._supported_symbols[0] if self._supported_symbols else "BTC_USDT_Perp"
+        await self._rest.post_market("full/v1/mini", {"instrument": self._base.normalize_symbol(sym)})
+
     # ========= 内部辅助方法 =========
 
     async def _refresh_instruments(self) -> None:
@@ -956,5 +967,4 @@ class GRVTAdapter(ExchangeAdapter):
         if not self._websocket:
             return
         await self._websocket.unsubscribe_all(symbol=symbol)
-
 

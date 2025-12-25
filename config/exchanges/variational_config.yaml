@@ -1,0 +1,16 @@
+variational:
+  name: "Variational Omni"
+  exchange_type: "perpetual"
+  testnet: false
+
+  # Variational 行情可能需要 token（如被 WAF/风控拦截，可在这里放 token 或 cookies）
+  api_key: ""
+  api_secret: ""
+
+  extra_params:
+    base_url: "https://omni.variational.io"
+    ticker_poll_interval_ms: 500
+    settlement_asset: "USDC"
+    instrument_type: "perpetual_future"
+    indicative_quote_qty: "0.001"
+

@@ -161,6 +161,12 @@ class HyperliquidWebSocket:
         # 清理ccxt WebSocket任务
         await self._cleanup_ccxt_tasks()
 
+        # 关闭 ccxt 连接（释放 aiohttp session / ws client）
+        try:
+            await self._close_ccxt_connection()
+        except Exception:
+            pass
+
         # 清理数据
         self._subscriptions.clear()
         self._latest_orderbooks.clear()

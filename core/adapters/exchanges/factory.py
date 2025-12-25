@@ -59,6 +59,7 @@ class ExchangeFactory:
             from .adapters.paradex import ParadexAdapter
             from .adapters.variational import VariationalAdapter
             from .adapters.grvt import GRVTAdapter
+            from .adapters.okx import OKXAdapter
 
             # 注册Hyperliquid适配器
             self.register_adapter(
@@ -255,6 +256,34 @@ class ExchangeFactory:
                         "env": "testnet",
                         # Trading sub-account id (uint64 in GRVT)
                         "sub_account_id": "",
+                    },
+                },
+            )
+
+            # 注册OKX适配器
+            self.register_adapter(
+                exchange_id="okx",
+                adapter_class=OKXAdapter,
+                exchange_type=ExchangeType.PERPETUAL,
+                name="OKX",
+                description="OKX 永续合约/现货交易所",
+                supported_features=[
+                    "spot_trading",
+                    "perpetual_trading",
+                    "websocket",
+                    "orderbook",
+                    "ticker",
+                    "ohlcv",
+                    "user_stream",
+                ],
+                default_config={
+                    "testnet": False,
+                    "default_leverage": 1,
+                    "enable_websocket": True,
+                    "rate_limits": {
+                        "ticker": {"max_requests": 60, "time_window": 60},
+                        "orderbook": {"max_requests": 60, "time_window": 60},
+                        "trading": {"max_requests": 20, "time_window": 60},
                     },
                 },
             )

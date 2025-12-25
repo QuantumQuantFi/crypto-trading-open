@@ -174,21 +174,40 @@ class DataReceiver:
                             
                             # 检查symbol是否在监控列表中
                             if std_symbol in symbols:
-                                # 直接入队，避免二次符号转换
-                                receiver_self.ticker_queue.put_nowait({
-                                    'exchange': _exchange_name,
-                                    'symbol': std_symbol,
-                                    'data': ticker,
-                                    'timestamp': datetime.now()
-                                })
-                                receiver_self.stats['ticker_received'] += 1
+                                # 直接入队，避免二次符号转换（队列满时丢弃旧数据，保证实时性）
+                                try:
+                                    receiver_self.ticker_queue.put_nowait({
+                                        'exchange': _exchange_name,
+                                        'symbol': std_symbol,
+                                        'data': ticker,
+                                        'timestamp': datetime.now()
+                                    })
+                                    receiver_self.stats['ticker_received'] += 1
+                                except asyncio.QueueFull:
+                                    # 队列满了，丢弃最旧的数据
+                                    try:
+                                        receiver_self.ticker_queue.get_nowait()
+                                        receiver_self.ticker_queue.put_nowait({
+                                            'exchange': _exchange_name,
+                                            'symbol': std_symbol,
+                                            'data': ticker,
+                                            'timestamp': datetime.now()
+                                        })
+                                    except Exception:
+                                        pass
+                                    receiver_self.stats['ticker_dropped'] += 1
                             else:
                                 # 符号不在监控列表（只记录一次）
                                 if not hasattr(receiver_self, '_lighter_ticker_symbol_mismatch_log'):
                                     receiver_self._lighter_ticker_symbol_mismatch_log = True
-                                    receiver_self.logger.warning(f"⚠️ [DataReceiver] Lighter ticker symbol不在监控列表: std_symbol={std_symbol}, symbols={symbols}")
-                        except Exception as e:
-                            receiver_self.logger.error(f"❌ [DataReceiver] lighter ticker回调失败: {e}", exc_info=True)
+                                    receiver_self.logger.warning(
+                                        "⚠️ [DataReceiver] Lighter ticker symbol不在监控列表: std_symbol=%s (configured=%s)",
+                                        std_symbol,
+                                        len(symbols),
+                                    )
+                        except Exception:
+                            # 高频路径：避免打印堆栈刷屏，统计为 dropped
+                            receiver_self.stats['ticker_dropped'] += 1
                     
                     # 转换所有符号为Lighter格式
                     exchange_symbols = []
@@ -402,7 +421,7 @@ class DataReceiver:
         Returns:
             回调函数
         """
-        def callback(symbol: str, orderbook: OrderBookData):
+        def callback(*args):
             """
             订单簿回调 - 零延迟设计
             
@@ -410,6 +429,19 @@ class DataReceiver:
                 symbol: 交易对
                 orderbook: 订单簿数据
             """
+            # 兼容不同适配器的回调签名：
+            # - callback(symbol, orderbook)
+            # - callback(orderbook)（从 orderbook.symbol 推断 symbol）
+            if len(args) == 2:
+                symbol, orderbook = args
+            elif len(args) == 1:
+                orderbook = args[0]
+                symbol = getattr(orderbook, 'symbol', None)
+                if not symbol:
+                    return
+            else:
+                return
+
             # 🚀 统一转换为标准符号（保证各层一致）
             std_symbol = self._normalize_symbol(symbol, exchange)
 
@@ -476,7 +508,7 @@ class DataReceiver:
         Returns:
             回调函数
         """
-        def callback(symbol: str, ticker: TickerData):
+        def callback(*args):
             """
             Ticker回调 - 零延迟设计
             
@@ -484,6 +516,19 @@ class DataReceiver:
                 symbol: 交易对
                 ticker: Ticker数据
             """
+            # 兼容不同适配器的回调签名：
+            # - callback(symbol, ticker)
+            # - callback(ticker)（从 ticker.symbol 推断 symbol）
+            if len(args) == 2:
+                symbol, ticker = args
+            elif len(args) == 1:
+                ticker = args[0]
+                symbol = getattr(ticker, 'symbol', None)
+                if not symbol:
+                    return
+            else:
+                return
+
             # 🚀 统一转换为标准符号
             std_symbol = self._normalize_symbol(symbol, exchange)
 
@@ -570,9 +615,19 @@ class DataReceiver:
             try:
                 # 🔥 添加3秒超时，避免卡住
                 await asyncio.wait_for(adapter.disconnect(), timeout=3.0)
+                # 部分适配器（例如基于 ccxt/aiohttp 的实现）需要显式 close 才会释放底层资源
+                close_coro = getattr(adapter, "close", None)
+                if callable(close_coro):
+                    try:
+                        result = close_coro()
+                        if asyncio.iscoroutine(result):
+                            await asyncio.wait_for(result, timeout=3.0)
+                    except asyncio.TimeoutError:
+                        print(f"⏱️  [{exchange}] close() 超时，强制跳过")
+                    except Exception:
+                        pass
                 print(f"✅ [{exchange}] 已断开连接")
             except asyncio.TimeoutError:
                 print(f"⏱️  [{exchange}] 断开连接超时，强制跳过")
             except Exception as e:
                 print(f"⚠️  [{exchange}] 断开连接失败: {e}")
-

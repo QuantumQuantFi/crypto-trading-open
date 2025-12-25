@@ -125,6 +125,18 @@ class ConfigManager:
                 self.config.ws_ping_interval = ws.get('ping_interval', 30)
                 self.config.ws_reconnect_delay = ws.get('reconnect_delay', 5)
                 self.config.ws_max_reconnect_attempts = ws.get('max_reconnect_attempts', 5)
+
+            if 'queues' in data:
+                queues = data['queues']
+                self.config.orderbook_queue_size = int(
+                    queues.get('orderbook_queue_size', self.config.orderbook_queue_size)
+                )
+                self.config.ticker_queue_size = int(
+                    queues.get('ticker_queue_size', self.config.ticker_queue_size)
+                )
+                self.config.analysis_queue_size = int(
+                    queues.get('analysis_queue_size', self.config.analysis_queue_size)
+                )
             
             if 'performance' in data:
                 perf = data['performance']
@@ -398,4 +410,3 @@ class ConfigManager:
     def get_display_symbols(self) -> List[str]:
         """获取原始显示用基础交易对（不含额外/多腿）"""
         return list(self.display_symbols)
-

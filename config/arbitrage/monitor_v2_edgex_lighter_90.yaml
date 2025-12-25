@@ -1,0 +1,130 @@
+# ============================================================================
+# 套利监控系统配置 V2（性能/EdgeX+Lighter/90币种 测试用）
+# - symbols 取自 edgex_markets.json 活跃度/成交额前 90（更贴近“多币种”真实场景）
+# ============================================================================
+
+exchanges:
+  - edgex
+  - lighter
+
+symbols:
+  - BTC-USDC-PERP
+  - ETH-USDC-PERP
+  - SOL-USDC-PERP
+  - XRP-USDC-PERP
+  - BNB-USDC-PERP
+  - DOGE-USDC-PERP
+  - HYPE-USDC-PERP
+  - ASTER-USDC-PERP
+  - PUMP-USDC-PERP
+  - ENA-USDC-PERP
+  - BCH-USDC-PERP
+  - LINK-USDC-PERP
+  - XLM-USDC-PERP
+  - SOON-USDC-PERP
+  - GIGGLE-USDC-PERP
+  - AVAX-USDC-PERP
+  - ZORA-USDC-PERP
+  - RESOLV-USDC-PERP
+  - ZEC-USDC-PERP
+  - LTC-USDC-PERP
+  - UB-USDC-PERP
+  - UNI-USDC-PERP
+  - TRX-USDC-PERP
+  - SUI-USDC-PERP
+  - ICP-USDC-PERP
+  - XMR-USDC-PERP
+  - XAUT-USDC-PERP
+  - MMT-USDC-PERP
+  - TAO-USDC-PERP
+  - HBAR-USDC-PERP
+  - AAVE-USDC-PERP
+  - PAXG-USDC-PERP
+  - IP-USDC-PERP
+  - MEGA-USDC-PERP
+  - APT-USDC-PERP
+  - AT-USDC-PERP
+  - OKB-USDC-PERP
+  - APR-USDC-PERP
+  - MNT-USDC-PERP
+  - VIRTUAL-USDC-PERP
+  - FIL-USDC-PERP
+  - AVNT-USDC-PERP
+  - 1000SHIB-USDC-PERP
+  - ADA-USDC-PERP
+  - 1000PEPE-USDC-PERP
+  - KITE-USDC-PERP
+  - DOT-USDC-PERP
+  - ZK-USDC-PERP
+  - NEAR-USDC-PERP
+  - TRUMP-USDC-PERP
+  - ONDO-USDC-PERP
+  - TON-USDC-PERP
+  - CRO-USDC-PERP
+  - ARB-USDC-PERP
+  - CAKE-USDC-PERP
+  - OP-USDC-PERP
+  - ETHFI-USDC-PERP
+  - KAITO-USDC-PERP
+  - WLD-USDC-PERP
+  - BLUAI-USDC-PERP
+  - JUP-USDC-PERP
+  - FLUID-USDC-PERP
+  - SPX-USDC-PERP
+  - ETC-USDC-PERP
+  - FARTCOIN-USDC-PERP
+  - BLESS-USDC-PERP
+  - SEI-USDC-PERP
+  - CFX-USDC-PERP
+  - LDO-USDC-PERP
+  - ALGO-USDC-PERP
+  - STX-USDC-PERP
+  - PYTH-USDC-PERP
+  - 1000BONK-USDC-PERP
+  - ATOM-USDC-PERP
+  - ON-USDC-PERP
+  - ENS-USDC-PERP
+  - 0G-USDC-PERP
+  - WLFI-USDC-PERP
+  - PENDLE-USDC-PERP
+  - TIA-USDC-PERP
+  - EIGEN-USDC-PERP
+  - GRASS-USDC-PERP
+  - ORDI-USDC-PERP
+  - 1000FLOKI-USDC-PERP
+  - CRV-USDC-PERP
+  - RAY-USDC-PERP
+  - WIF-USDC-PERP
+  - SNX-USDC-PERP
+  - POPCAT-USDC-PERP
+  - FF-USDC-PERP
+
+thresholds:
+  min_spread_pct: 0.1
+  min_funding_rate_diff: 0.01
+
+websocket:
+  ping_interval: 30
+  reconnect_delay: 5
+  max_reconnect_attempts: 5
+
+queues:
+  orderbook_queue_size: 30000
+  ticker_queue_size: 12000
+  analysis_queue_size: 500
+
+performance:
+  analysis_interval_ms: 10
+  ui_refresh_interval_ms: 1000
+
+health_check:
+  interval: 10
+  data_timeout: 30
+
+spread_history:
+  enabled: false
+
+debug_cli:
+  enabled: false
+  interval_seconds: 1.0
+

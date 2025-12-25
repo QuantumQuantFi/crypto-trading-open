@@ -1,0 +1,56 @@
+# ============================================================================
+# 套利监控系统配置 V2（性能/全交易所/10币种 测试用）
+# ============================================================================
+
+exchanges:
+  - edgex
+  - backpack
+  - lighter
+  - paradex
+  - hyperliquid
+  - binance
+  - okx
+  - grvt
+  - variational
+
+symbols:
+  - BTC-USDC-PERP
+  - ETH-USDC-PERP
+  - SOL-USDC-PERP
+  - DOGE-USDC-PERP
+  - AVAX-USDC-PERP
+  - LINK-USDC-PERP
+  - ADA-USDC-PERP
+  - AAVE-USDC-PERP
+  - UNI-USDC-PERP
+  - NEAR-USDC-PERP
+
+thresholds:
+  min_spread_pct: 0.1
+  min_funding_rate_diff: 0.01
+
+websocket:
+  ping_interval: 30
+  reconnect_delay: 5
+  max_reconnect_attempts: 5
+
+queues:
+  orderbook_queue_size: 5000
+  ticker_queue_size: 2000
+  analysis_queue_size: 200
+
+performance:
+  analysis_interval_ms: 10
+  ui_refresh_interval_ms: 1000
+
+health_check:
+  interval: 10
+  data_timeout: 30
+
+# 性能测试默认关闭历史写入，避免 I/O 影响结果
+spread_history:
+  enabled: false
+
+debug_cli:
+  enabled: false
+  interval_seconds: 1.0

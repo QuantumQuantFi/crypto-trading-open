@@ -113,16 +113,30 @@ class BinanceWebSocket(BinanceBase):
                 except asyncio.CancelledError:
                     pass
             
-            # 关闭WebSocket连接
-            if self._websocket:
-                await self._websocket.close()
-                self._websocket = None
+            # 关闭现货每个交易对的 WebSocket
+            for ws in list(getattr(self, "_spot_websockets", {}).values()):
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            if hasattr(self, "_spot_websockets"):
+                self._spot_websockets.clear()
+
+            # 关闭期货/永续 WebSocket
+            futures_ws = getattr(self, "_futures_websocket", None)
+            if futures_ws:
+                try:
+                    await futures_ws.close()
+                except Exception:
+                    pass
+                self._futures_websocket = None
                 
             if self._user_websocket:
                 await self._user_websocket.close()
                 self._user_websocket = None
             
             self._connected = False
+            self._futures_connected = False
             self._user_connected = False
             
             if self.logger:
@@ -839,27 +853,41 @@ class BinanceWebSocket(BinanceBase):
     async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBookData], None]):
         """订阅订单簿数据"""
         try:
-            # 确保连接
-            if not self._connected:
-                await self._connect_market_stream()
-            
-            # 构建流名称
-            binance_symbol = self.map_symbol_to_binance(symbol).lower()
+            # 🔥 根据 symbol 形态选择现货/期货 WS
+            # - 期货/永续：BTC/USDT:USDT（包含 ':'）
+            # - 现货：BTC/USDT（不含 ':'）
+            is_futures = ':' in symbol
+
+            # 构建流名称（统一清洗）
+            mapped = self.map_symbol_to_binance(symbol)
+            clean = mapped.split(':')[0].replace('/', '').replace('-', '')
+            binance_symbol = clean.lower()
             stream_name = f"{binance_symbol}@depth@100ms"
-            
-            # 注册回调
-            self._subscriptions[stream_name] = callback
-            
-            # 发送订阅消息
-            subscribe_msg = {
-                "method": "SUBSCRIBE",
-                "params": [stream_name],
-                "id": self._stream_id_counter
-            }
-            self._stream_id_counter += 1
-            
-            if self._websocket:
-                await self._websocket.send(json.dumps(subscribe_msg))
+
+            if is_futures:
+                if not self._futures_connected:
+                    await self._connect_futures_stream()
+                self._futures_subscriptions[stream_name] = callback
+                subscribe_msg = {
+                    "method": "SUBSCRIBE",
+                    "params": [stream_name],
+                    "id": self._futures_stream_id_counter
+                }
+                self._futures_stream_id_counter += 1
+                if self._futures_websocket:
+                    await self._futures_websocket.send(json.dumps(subscribe_msg))
+            else:
+                if not self._connected:
+                    await self._connect_market_stream()
+                self._subscriptions[stream_name] = callback
+                subscribe_msg = {
+                    "method": "SUBSCRIBE",
+                    "params": [stream_name],
+                    "id": self._stream_id_counter
+                }
+                self._stream_id_counter += 1
+                if self._websocket:
+                    await self._websocket.send(json.dumps(subscribe_msg))
             
             if self.logger:
                 self.logger.info(f"📊 订阅订单簿数据: {symbol}")
@@ -972,7 +1000,9 @@ class BinanceWebSocket(BinanceBase):
     @property
     def is_connected(self) -> bool:
         """检查市场数据流连接状态"""
-        return self._connected and self._websocket and not self._websocket.closed
+        spot_ok = bool(self._connected and self._websocket and not self._websocket.closed)
+        futures_ok = bool(self._futures_connected and self._futures_websocket and not self._futures_websocket.closed)
+        return spot_ok or futures_ok
     
     @property
     def is_user_connected(self) -> bool:

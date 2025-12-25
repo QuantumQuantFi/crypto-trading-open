@@ -29,6 +29,13 @@ class SimpleSymbolConverter:
     
     # 交易所格式映射（直接硬编码，避免读取配置文件）
     EXCHANGE_FORMATS = {
+        'hyperliquid': {
+            'separator': '/',           # BTC/USDC:USDC
+            'type_separator': ':',
+            'default_quote': 'USDC',
+            'perp_type': 'USDC',        # Hyperliquid PERP 用 :USDC
+            'spot_type': 'SPOT',
+        },
         'backpack': {
             'separator': '_',
             'perp_suffix': '_PERP',
@@ -48,6 +55,30 @@ class SimpleSymbolConverter:
         'paradex': {
             'separator': '-',
             'perp_suffix': '-PERP',
+            'spot_suffix': '',
+        },
+        'binance': {
+            'separator': '',
+            'perp_suffix': '',          # BTCUSDT（无后缀）
+            'spot_suffix': '',
+            'quote_map': {'USDC': 'USDT'},
+        },
+        'okx': {
+            'separator': '-',
+            'perp_suffix': '-SWAP',     # BTC-USDT-SWAP
+            'spot_suffix': '',
+            'quote_map': {'USDC': 'USDT'},
+        },
+        'grvt': {
+            'separator': '_',
+            'perp_suffix': '_Perp',     # BTC_USDT_Perp
+            'spot_suffix': '',
+            'quote_map': {'USDC': 'USDT'},
+        },
+        'variational': {
+            'separator': '',
+            'base_only': True,          # 只用 underlying（BTC/ETH...）
+            'perp_suffix': '',
             'spot_suffix': '',
         },
     }
@@ -197,6 +228,30 @@ class SimpleSymbolConverter:
         # 特殊处理：Lighter 只返回基础币种
         if fmt.get('base_only'):
             return base
+
+        # Hyperliquid：BTC/USDC:USDC（永续）
+        if exchange == 'hyperliquid':
+            quote = fmt.get('default_quote', quote) or quote
+            if market_type == 'PERP':
+                typ = fmt.get('perp_type', 'USDC')
+                return f"{base}/{quote}:{typ}"
+            if market_type == 'SPOT':
+                typ = fmt.get('spot_type', 'SPOT')
+                return f"{base}/{quote}:{typ}"
+            return f"{base}/{quote}"
+
+        # Binance：为了让永续合约走期货 WS（单连接 + SUBSCRIBE 多流），
+        # PERP 输出统一使用 ccxt 兼容格式：BTC/USDT:USDT
+        if exchange == 'binance' and market_type == 'PERP':
+            quote_map = fmt.get('quote_map') or {}
+            if quote in quote_map:
+                quote = quote_map[quote]
+            return f"{base}/{quote}:{quote}"
+
+        # quote 映射（USDC -> USDT / USD 等）
+        quote_map = fmt.get('quote_map') or {}
+        if quote in quote_map:
+            quote = quote_map[quote]
         
         # 🔥 特殊处理：EdgeX使用USD作为quote，而不是USDC
         if exchange in ('edgex', 'paradex'):
@@ -267,6 +322,73 @@ class SimpleSymbolConverter:
                 return f"{base}-{quote}-{market_type}"
             # 当频道返回 ALL 等特殊字符串时，直接回传
             return exchange_symbol
+        elif exchange == 'hyperliquid':
+            # Hyperliquid: BTC/USDC:USDC -> BTC-USDC-PERP
+            sym = exchange_symbol.strip()
+            if '/' in sym:
+                base_part, rest = sym.split('/', 1)
+                quote = rest
+                typ = None
+                if ':' in rest:
+                    quote, typ = rest.split(':', 1)
+                quote = quote.upper()
+                if quote == 'USD':
+                    quote = 'USDC'
+                if not typ:
+                    return f"{base_part.upper()}-{quote}-SPOT"
+                typ_u = typ.upper()
+                if typ_u in ('USDC', 'PERP', 'SWAP'):
+                    return f"{base_part.upper()}-{quote}-PERP"
+                if typ_u == 'SPOT':
+                    return f"{base_part.upper()}-{quote}-SPOT"
+                return f"{base_part.upper()}-{quote}-{typ_u}"
+        elif exchange == 'binance':
+            # Binance: BTCUSDT -> BTC-USDC-PERP
+            sym = exchange_symbol.strip().upper()
+            # 兼容期货/永续格式：BTC/USDT:USDT
+            if "/" in sym:
+                base_part, rest = sym.split("/", 1)
+                quote_part = rest
+                if ":" in rest:
+                    quote_part, _typ = rest.split(":", 1)
+                quote_part = quote_part.upper()
+                if quote_part == "USDT":
+                    quote_part = "USDC"
+                return f"{base_part.upper()}-{quote_part}-PERP"
+            for q in ('USDT', 'USDC', 'BUSD'):
+                if sym.endswith(q) and len(sym) > len(q):
+                    base = sym[: -len(q)]
+                    return f"{base}-USDC-PERP"
+        elif exchange == 'okx':
+            # OKX: BTC-USDT-SWAP -> BTC-USDC-PERP
+            sym = exchange_symbol.strip().upper()
+            parts = sym.split('-')
+            if len(parts) >= 3 and parts[-1] == 'SWAP':
+                base = parts[0]
+                quote = parts[1]
+                if quote == 'USDT':
+                    quote = 'USDC'
+                return f"{base}-{quote}-PERP"
+        elif exchange == 'grvt':
+            # GRVT: BTC_USDT_Perp -> BTC-USDC-PERP
+            sym = exchange_symbol.strip().replace('-', '_').replace('/', '_')
+            parts = sym.split('_')
+            if len(parts) >= 3:
+                base = parts[0].upper()
+                quote = parts[1].upper()
+                typ_raw = parts[2]
+                typ = typ_raw.upper()
+                if quote == 'USDT':
+                    quote = 'USDC'
+                # 处理 Perp / PERP / PERPETUAL
+                if typ in ('PERP', 'PERPETUAL') or typ_raw.lower() == 'perp' or typ.startswith('PERP'):
+                    return f"{base}-{quote}-PERP"
+                return f"{base}-{quote}-{typ}"
+        elif exchange == 'variational':
+            # Variational: BTC -> BTC-USDC-PERP
+            sym = exchange_symbol.strip().upper()
+            if sym and sym.isalnum():
+                return f"{sym}-USDC-PERP"
         
         # 5. 无法推断，返回原始符号
         return exchange_symbol
@@ -294,4 +416,3 @@ class SimpleSymbolConverter:
     def get_supported_exchanges(self) -> list:
         """获取支持的交易所列表"""
         return list(self.EXCHANGE_FORMATS.keys())
-

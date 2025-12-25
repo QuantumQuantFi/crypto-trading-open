@@ -259,6 +259,8 @@ class ArbitrageOrchestratorSimple:
                             'backpack': ExchangeType.SPOT,
                             'paradex': ExchangeType.PERPETUAL,
                             'grvt': ExchangeType.PERPETUAL,
+                            'okx': ExchangeType.PERPETUAL,
+                            'variational': ExchangeType.PERPETUAL,
                         }
                         extra_params = dict(config_data.get('extra_params', {}))
                         auth = config_loader.load_auth_config(
@@ -493,4 +495,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

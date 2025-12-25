@@ -92,6 +92,11 @@ class OKXAdapter(ExchangeAdapter):
     async def _do_disconnect(self) -> None:
         """断开连接实现"""
         try:
+            # 停止轮询任务（避免 close 后仍继续调用 REST 导致刷屏报错）
+            if not hasattr(self, "_stop_polling"):
+                self._stop_polling = set()
+            self._stop_polling.add("ALL")
+
             # 关闭REST连接
             await self._rest.close()
             
