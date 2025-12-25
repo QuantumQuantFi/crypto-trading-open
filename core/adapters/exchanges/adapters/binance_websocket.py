@@ -145,11 +145,28 @@ class BinanceWebSocket(BinanceBase):
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ 关闭WebSocket连接失败: {str(e)}")
+
+    def _ws_is_open(self, ws) -> bool:
+        """兼容 websockets 版本差异的连接状态判断（v15 ClientConnection 没有 .closed）。"""
+        if not ws:
+            return False
+        state = getattr(ws, "state", None)
+        if state is not None:
+            try:
+                from websockets.protocol import State
+                return state == State.OPEN
+            except Exception:
+                return str(state).endswith("OPEN") or state == 1
+        closed = getattr(ws, "closed", None)
+        if isinstance(closed, bool):
+            return not closed
+        close_code = getattr(ws, "close_code", None)
+        return close_code is None
     
     async def _connect_market_stream(self) -> bool:
         """连接现货市场数据流"""
         try:
-            if self._websocket and not self._websocket.closed:
+            if self._websocket and self._ws_is_open(self._websocket):
                 return True
             
             # 使用现货 WebSocket URL
@@ -183,7 +200,7 @@ class BinanceWebSocket(BinanceBase):
     async def _connect_futures_stream(self) -> bool:
         """连接期货/永续合约市场数据流"""
         try:
-            if self._futures_websocket and not self._futures_websocket.closed:
+            if self._futures_websocket and self._ws_is_open(self._futures_websocket):
                 return True
             
             # 使用期货 WebSocket URL
@@ -1000,11 +1017,11 @@ class BinanceWebSocket(BinanceBase):
     @property
     def is_connected(self) -> bool:
         """检查市场数据流连接状态"""
-        spot_ok = bool(self._connected and self._websocket and not self._websocket.closed)
-        futures_ok = bool(self._futures_connected and self._futures_websocket and not self._futures_websocket.closed)
+        spot_ok = bool(self._connected and self._websocket and self._ws_is_open(self._websocket))
+        futures_ok = bool(self._futures_connected and self._futures_websocket and self._ws_is_open(self._futures_websocket))
         return spot_ok or futures_ok
     
     @property
     def is_user_connected(self) -> bool:
         """检查用户数据流连接状态"""
-        return self._user_connected and self._user_websocket and not self._user_websocket.closed 
+        return bool(self._user_connected and self._user_websocket and self._ws_is_open(self._user_websocket))
