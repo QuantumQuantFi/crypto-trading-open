@@ -13,5 +13,12 @@ okx:
   # ws_url: "wss://ws.okx.com:8443/ws/v5/public"
   # private_ws_url: "wss://ws.okx.com:8443/ws/v5/private"
 
-  extra_params: {}
-
+  extra_params:
+    # 启动阶段“慢速”拉取一次 markets（REST），避免后续符号/精度/市场映射缺失
+    startup_load_markets: true
+    # OKX REST 有严格限频：更保守的 ccxt 节流（ms）
+    ccxt_rate_limit_ms: 1000
+    # 监控/WS-only 模式可选：少一次启动期 REST
+    startup_fetch_time: false
+    # WS 短暂波动时不要回退到 REST 轮询（避免 45/90 币种轮询风暴）
+    allow_polling_fallback: false

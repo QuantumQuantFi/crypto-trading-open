@@ -97,11 +97,22 @@
 - **OKX 修复点（简单可回溯）**：
   - `OKXRest.initialize()` 在“无鉴权（仅公共行情监控）”场景默认不强制 `load_markets`，并设置更保守的 `ccxt.rateLimit` 与 50011 的 backoff（`core/adapters/exchanges/adapters/okx_rest.py`）。
   - `OKXAdapter.subscribe_*()` 逻辑调整为“直接尝试 WS 订阅；失败时默认跳过（除非显式开启轮询 fallback）”，避免启动时因 `is_connected==False` 误判而为每个 symbol 启动 REST 轮询（`core/adapters/exchanges/adapters/okx.py`）。
+- **OKX 配置建议（两者兼得：只在启动时慢速 load_markets + 禁用轮询回退）**：
+  - `config/exchanges/okx_config.yaml`：
+    - `startup_load_markets: true`
+    - `ccxt_rate_limit_ms: 1000`（更保守节流）
+    - `startup_fetch_time: false`（可选）
+    - `allow_polling_fallback: false`（避免 WS 抖动时触发轮询风暴）
 - **结果（一次运行样本，warmup=8s 后统计 35s）**：
   - **OKX**：未再出现 `50011 Too Many Requests`；也未再出现“因轮询触发的 does not have market symbol”类 REST 错误刷屏。
   - **订单簿**：稳态 `Q(ob)` 基本为 0；`delay_ms(ob p95)` 多数窗口在 **~25–55ms**，偶发抖动到 **~135ms**，`max` 约 **< 1s**（单次尖峰）。
   - **Ticker**：预热阶段有明显长尾（启动 burst）；预热后 `delay_ms(tk p95)` 多数窗口在 **~30–72ms**，队列基本为 0。
   - **丢弃**：统计窗口内 `drop(ob/tk)=0/0`（本次样本未触发队列丢弃策略）。
+- **结果（启用“启动期慢速 load_markets”后再次复测：warmup=10s 后统计 40s）**：
+  - **OKX**：在开启 `startup_load_markets: true` + `ccxt_rate_limit_ms: 1000` 的情况下，仍未观察到 `50011 Too Many Requests`。
+  - **整体稳态**：绝大多数统计窗口队列接近 0，未触发丢弃（`drop(ob/tk)=0/0`）；订单簿延迟仍为 **ms 级**（p95 多在 **~30–96ms**）。
+  - **偶发抖动**：某窗口出现 `Q(ob/tk)~993/813` 的短暂堆积，但随后恢复到 0（未形成持续秒级积压）。
+  - **退出稳定性（仍需跟踪）**：运行尾部仍可能出现 `disconnect()` 超时（如 paradex/binance）与 `Unclosed client session`（aiohttp session 未完全释放）。
 
 ## 当前的说明（现状梳理）
 > 这一章是对“它用哪些代码如何实现、是否会触发 418、能否服务化”的当前实现说明。
