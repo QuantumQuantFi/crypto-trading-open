@@ -129,6 +129,15 @@ class DataReceiver:
             try:
                 # print(f"\n📡 [DataReceiver] 正在处理交易所: {exchange}")
                 # print(f"🔍 [DataReceiver] 适配器类型: {type(adapter).__name__}")
+
+                # 避免订阅阶段因个别交易所/网络问题永久阻塞启动：为订阅调用增加超时保护
+                subscribe_timeout_seconds = 15.0
+
+                async def _await_with_timeout(coro):
+                    try:
+                        return await asyncio.wait_for(coro, timeout=subscribe_timeout_seconds)
+                    except asyncio.TimeoutError:
+                        return None
                 
                 # ============================================================
                 # 🔥 交易所特殊处理扩展点
@@ -234,8 +243,8 @@ class DataReceiver:
                     
                     # 使用批量订阅方法（设置统一回调，所有符号共享）
                     if exchange_symbols:
-                        await adapter.batch_subscribe_orderbooks(exchange_symbols, callback=lighter_orderbook_callback)
-                        await adapter.batch_subscribe_tickers(exchange_symbols, callback=lighter_ticker_callback)
+                        await _await_with_timeout(adapter.batch_subscribe_orderbooks(exchange_symbols, callback=lighter_orderbook_callback))
+                        await _await_with_timeout(adapter.batch_subscribe_tickers(exchange_symbols, callback=lighter_ticker_callback))
                 
                 elif exchange == "edgex":
                     # EdgeX特殊处理：使用批量订阅模式（设置全局回调）
@@ -303,8 +312,8 @@ class DataReceiver:
                     
                     # 使用批量订阅方法
                     if exchange_symbols:
-                        await adapter.websocket.batch_subscribe_orderbooks(exchange_symbols, callback=edgex_orderbook_callback_wrapper)
-                        await adapter.websocket.batch_subscribe_tickers(exchange_symbols, callback=edgex_ticker_callback_wrapper)
+                        await _await_with_timeout(adapter.websocket.batch_subscribe_orderbooks(exchange_symbols, callback=edgex_orderbook_callback_wrapper))
+                        await _await_with_timeout(adapter.websocket.batch_subscribe_tickers(exchange_symbols, callback=edgex_ticker_callback_wrapper))
                 
                 elif exchange == "backpack":
                     # Backpack特殊处理：使用批量订阅模式（设置全局回调）
@@ -381,8 +390,8 @@ class DataReceiver:
                     
                     # 批量订阅方法（BackpackAdapter的batch_subscribe_orderbooks和batch_subscribe_tickers）
                     if exchange_symbols:
-                        await adapter.batch_subscribe_orderbooks(exchange_symbols, callback=backpack_orderbook_callback_wrapper)
-                        await adapter.batch_subscribe_tickers(exchange_symbols, callback=backpack_ticker_callback_wrapper)
+                        await _await_with_timeout(adapter.batch_subscribe_orderbooks(exchange_symbols, callback=backpack_orderbook_callback_wrapper))
+                        await _await_with_timeout(adapter.batch_subscribe_tickers(exchange_symbols, callback=backpack_ticker_callback_wrapper))
                 
                 else:
                     # ============================================================
@@ -402,9 +411,11 @@ class DataReceiver:
                     for standard_symbol in symbols:
                         try:
                             exchange_symbol = self.symbol_converter.convert_to_exchange(standard_symbol, exchange)
-                            await adapter.subscribe_orderbook(
-                                symbol=exchange_symbol,
-                                callback=self._create_orderbook_callback(exchange)
+                            await _await_with_timeout(
+                                adapter.subscribe_orderbook(
+                                    symbol=exchange_symbol,
+                                    callback=self._create_orderbook_callback(exchange)
+                                )
                             )
                         except Exception:
                             pass  # 静默处理订阅错误
@@ -412,9 +423,11 @@ class DataReceiver:
                     for standard_symbol in symbols:
                         try:
                             exchange_symbol = self.symbol_converter.convert_to_exchange(standard_symbol, exchange)
-                            await adapter.subscribe_ticker(
-                                symbol=exchange_symbol,
-                                callback=self._create_ticker_callback(exchange)
+                            await _await_with_timeout(
+                                adapter.subscribe_ticker(
+                                    symbol=exchange_symbol,
+                                    callback=self._create_ticker_callback(exchange)
+                                )
                             )
                         except Exception:
                             pass  # 静默处理订阅错误
