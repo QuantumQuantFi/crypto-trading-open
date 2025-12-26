@@ -9,6 +9,7 @@
 
 import asyncio
 import time
+from datetime import timezone
 from typing import Dict, Optional, List, Deque
 from datetime import datetime
 from collections import defaultdict
@@ -357,7 +358,11 @@ class DataProcessor:
                 if isinstance(exchange_timestamp, (int, float)):
                     exchange_age = now_ts - float(exchange_timestamp)
                 else:
-                    exchange_age = now_ts - float(exchange_timestamp.timestamp())
+                    ts = exchange_timestamp
+                    # 交易所时间戳常见来源：datetime.utcfromtimestamp(...)（naive 但语义是 UTC）
+                    if isinstance(ts, datetime) and ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    exchange_age = now_ts - float(ts.timestamp())
             except Exception:
                 exchange_age = (now - exchange_timestamp).total_seconds()
             if exchange_age > max_age_seconds:
