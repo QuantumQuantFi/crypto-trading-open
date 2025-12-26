@@ -147,7 +147,8 @@ Monitor/V2 具备异步历史记录能力（避免阻塞主链路）：
 - 让监控系统可以 `--no-ui` 真正无 UI 运行，并提供：
   - `GET /health`：订阅规模/延迟/断连/陈旧度
   - `GET /snapshot`：当前 BBO/价差/机会快照
-  - `WS /stream`：推送增量（订单簿/价差/机会）
+  - `WS /ws/stream`：低频推送（价差/机会/延迟快照），基于后台缓存结果，避免额外计算开销
+  - `GET /ui`：轻量网页（无依赖前端），用于随时查看实时价差（默认 1Hz 推送）
 
 ### Phase C：历史落盘与回放增强（不牺牲实时性）
 - 明确“写盘频率/字段/保留策略”，保证写盘压力与实时链路隔离。
@@ -161,6 +162,8 @@ Monitor/V2 具备异步历史记录能力（避免阻塞主链路）：
 - 最小可用接口（MVP）：
   - `GET /health`：运行状态、各交易所连接状态、队列积压/丢弃、处理延迟分位数
   - `GET /snapshot`：返回 `exchange+symbol` 的最新 BBO、时间戳链路、价差/机会（可按参数过滤）
+  - `WS /ws/stream`：网页/其它服务用的低频推送（默认 1Hz，支持 query 参数调整）
+  - `GET /ui`：内置 Dashboard（浏览器打开即可），用于实时查看价差/机会（尽量不占用性能）
 
 ### 9.2 动态 watchlist 端口（第二优先级）
 - 需求：FR_monitor 把“发现的币种/交易所”发给本服务，本服务开始订阅并持续 24h；若同一交易所再次触发则延长存活时间。
@@ -169,6 +172,10 @@ Monitor/V2 具备异步历史记录能力（避免阻塞主链路）：
   - `POST /watchlist/touch`：按 `(exchange, symbol)` 延长 TTL（用于“同交易所再次触发则续命”）
   - `POST /watchlist/remove`：手动结束关注（可选指定 exchanges）
   - `GET /watchlist`：查看当前关注列表、到期时间、剩余 TTL、订阅状态
+
+### 9.5 使用方式（服务化 + 可选命令行 UI）
+- 仅服务化（推荐用于评估健康度/低延迟）：`./.venv-py312/bin/python run_monitor_service.py --config config/arbitrage/monitor_v2_ws_only_45.yaml`
+- 同时启用原先 Rich 命令行界面（会有少量终端渲染开销）：`./.venv-py312/bin/python run_monitor_service.py --enable-cli --config config/arbitrage/monitor_v2_ws_only_45.yaml`
 
 ### 9.3 生命周期与订阅策略（避免 90 币种下的订阅/回退风暴）
 - 关注粒度：以 `(exchange, symbol)` 为单位维护 `expire_at`（满足“同交易所触发才延寿”）

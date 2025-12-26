@@ -229,8 +229,8 @@ class SubscriptionController:
 class MonitorApiRuntime:
     """Headless orchestrator + watchlist + 动态订阅控制（供 FastAPI 调用）"""
 
-    def __init__(self, config_path: Path, debug_config: Optional[DebugConfig] = None):
-        self.orchestrator = ArbitrageOrchestrator(config_path, debug_config or DebugConfig(), enable_ui=False)
+    def __init__(self, config_path: Path, debug_config: Optional[DebugConfig] = None, enable_ui: bool = False):
+        self.orchestrator = ArbitrageOrchestrator(config_path, debug_config or DebugConfig(), enable_ui=enable_ui)
         self.watchlist = WatchlistManager(default_exchanges=self.orchestrator.config.exchanges)
         self.subscriptions = SubscriptionController(self.orchestrator)
         self._prune_task: Optional[asyncio.Task] = None
