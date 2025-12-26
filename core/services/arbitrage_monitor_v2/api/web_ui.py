@@ -151,7 +151,7 @@ def render_monitor_ui_html() -> str:
         </div>
       </div>
       <div class="footer">
-        默认优先使用 WebSocket 推送（`/ws/stream`）；若网络环境拦截 WS Upgrade，则自动降级为 HTTP 轮询（`/ui/data`）。
+        仅使用 HTTP 轮询（`/ui/data`），不依赖 WebSocket。
       </div>
     </main>
 
@@ -176,10 +176,7 @@ def render_monitor_ui_html() -> str:
         }
       };
 
-      let ws = null;
       let pollTimer = null;
-      let wsHandshakeTimer = null;
-      let lastMsgAt = 0;
 
       function buildQuery() {
         const intervalMs = parseInt(el("intervalMs").value || "1000", 10);
@@ -193,13 +190,6 @@ def render_monitor_ui_html() -> str:
         if (sym.length) qs.set("symbol_like", sym);
         if (minAbs.length) qs.set("min_abs_spread_pct", minAbs);
         return { intervalMs, qs };
-      }
-
-      function buildWsUrl() {
-        const { qs } = buildQuery();
-
-        const proto = (location.protocol === "https:") ? "wss" : "ws";
-        return `${proto}://${location.host}/ws/stream?${qs.toString()}`;
       }
 
       function buildHttpUrl() {
@@ -216,17 +206,6 @@ def render_monitor_ui_html() -> str:
         if (pollTimer) {
           clearTimeout(pollTimer);
           pollTimer = null;
-        }
-      }
-
-      function stopWs() {
-        if (wsHandshakeTimer) {
-          clearTimeout(wsHandshakeTimer);
-          wsHandshakeTimer = null;
-        }
-        if (ws) {
-          try { ws.close(); } catch (_) {}
-          ws = null;
         }
       }
 
@@ -274,7 +253,6 @@ def render_monitor_ui_html() -> str:
       }
 
       function startPolling() {
-        stopWs();
         stopPolling();
         setConnState("polling", true);
         const { intervalMs } = buildQuery();
@@ -292,45 +270,16 @@ def render_monitor_ui_html() -> str:
         loop();
       }
 
-      function connect() {
-        stopPolling();
-        stopWs();
-        setConnState("connecting", false);
-
-        const url = buildWsUrl();
-        ws = new WebSocket(url);
-
-        lastMsgAt = 0;
-        wsHandshakeTimer = setTimeout(() => {
-          // 外网/代理环境常见：WS Upgrade 被拦截或超时；此时自动降级为轮询
-          if (!lastMsgAt) startPolling();
-        }, 2000);
-
-        ws.onopen = () => setConnState("connected", true);
-        ws.onclose = () => startPolling();
-        ws.onerror = () => startPolling();
-        ws.onmessage = (ev) => {
-          try {
-            const p = JSON.parse(ev.data);
-            if (p && p.type === "snapshot") {
-              lastMsgAt = Date.now();
-              applyPayload(p);
-            }
-          } catch (_) {}
-        };
-      }
-
-      el("applyBtn").addEventListener("click", () => connect());
+      el("applyBtn").addEventListener("click", () => startPolling());
       document.addEventListener("visibilitychange", () => {
         if (document.hidden) {
           stopPolling();
-          stopWs();
           setConnState("paused", false);
         } else {
-          connect();
+          startPolling();
         }
       });
-      connect();
+      startPolling();
     </script>
   </body>
 </html>

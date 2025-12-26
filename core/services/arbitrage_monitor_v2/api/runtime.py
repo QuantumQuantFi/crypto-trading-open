@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,6 +8,11 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from ..config.debug_config import DebugConfig
 from ..core.orchestrator import ArbitrageOrchestrator
+
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_BASELINE_SYMBOLS = ["BTC-USDC-PERP", "ETH-USDC-PERP"]
 
 
 @dataclass
@@ -25,13 +32,108 @@ class WatchItem:
         return max(int(self.expire_at - time.time()), 0)
 
 
+class SqliteWatchlistStore:
+    """本地持久化 watchlist（简单、无额外依赖）。"""
+
+    def __init__(self, db_path: Path):
+        self._db_path = db_path
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    exchange TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    expire_at REAL,
+                    source TEXT,
+                    reason TEXT,
+                    PRIMARY KEY (exchange, symbol)
+                );
+                """
+            )
+
+    def load_active_items(self, *, now: float) -> Tuple[List[WatchItem], List[Tuple[str, str]]]:
+        active: List[WatchItem] = []
+        expired_keys: List[Tuple[str, str]] = []
+        with self._connect() as conn:
+            rows = list(
+                conn.execute(
+                    "SELECT exchange, symbol, created_at, updated_at, expire_at, source, reason FROM watchlist"
+                )
+            )
+        for r in rows:
+            expire_at = r["expire_at"]
+            if expire_at is not None and float(expire_at) <= now:
+                expired_keys.append((str(r["exchange"]), str(r["symbol"])))
+                continue
+            active.append(
+                WatchItem(
+                    exchange=str(r["exchange"]),
+                    symbol=str(r["symbol"]),
+                    created_at=float(r["created_at"]),
+                    updated_at=float(r["updated_at"]),
+                    expire_at=None if expire_at is None else float(expire_at),
+                    source=None if r["source"] is None else str(r["source"]),
+                    reason=None if r["reason"] is None else str(r["reason"]),
+                )
+            )
+        return active, expired_keys
+
+    def upsert_items(self, items: List[WatchItem]) -> None:
+        if not items:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO watchlist (exchange, symbol, created_at, updated_at, expire_at, source, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(exchange, symbol) DO UPDATE SET
+                    created_at=excluded.created_at,
+                    updated_at=excluded.updated_at,
+                    expire_at=excluded.expire_at,
+                    source=excluded.source,
+                    reason=excluded.reason
+                """,
+                [
+                    (
+                        i.exchange,
+                        i.symbol,
+                        float(i.created_at),
+                        float(i.updated_at),
+                        None if i.expire_at is None else float(i.expire_at),
+                        i.source,
+                        i.reason,
+                    )
+                    for i in items
+                ],
+            )
+
+    def delete_keys(self, keys: List[Tuple[str, str]]) -> None:
+        if not keys:
+            return
+        with self._connect() as conn:
+            conn.executemany("DELETE FROM watchlist WHERE exchange=? AND symbol=?", list(keys))
+
+
 class WatchlistManager:
     """按 (exchange, symbol) 维护 TTL 的关注列表（用于动态订阅与入队过滤）"""
 
-    def __init__(self, default_exchanges: Iterable[str]):
+    def __init__(self, default_exchanges: Iterable[str], store: Optional[SqliteWatchlistStore] = None):
         self._default_exchanges = list(default_exchanges)
         self._items: Dict[Tuple[str, str], WatchItem] = {}
         self._lock = asyncio.Lock()
+        self._store = store
 
     @staticmethod
     def _normalize_exchange(exchange: str) -> str:
@@ -66,6 +168,27 @@ class WatchlistManager:
             if item.expire_at is None or item.expire_at > now:
                 symbols.add(symbol)
         return list(symbols)
+
+    async def load_from_store(self) -> None:
+        if self._store is None:
+            return
+        now = time.time()
+        items, expired_keys = await asyncio.to_thread(self._store.load_active_items, now=now)
+        async with self._lock:
+            for it in items:
+                key = (self._normalize_exchange(it.exchange), self._normalize_symbol(it.symbol))
+                self._items[key] = WatchItem(
+                    exchange=key[0],
+                    symbol=key[1],
+                    created_at=float(it.created_at),
+                    updated_at=float(it.updated_at),
+                    expire_at=it.expire_at,
+                    source=it.source,
+                    reason=it.reason,
+                )
+        if expired_keys:
+            # 清理已过期的持久化数据，避免不断膨胀
+            await asyncio.to_thread(self._store.delete_keys, expired_keys)
 
     async def add(
         self,
@@ -107,6 +230,15 @@ class WatchlistManager:
                         existing.expire_at = max(existing.expire_at, expire_at)
                     touched_pairs.append(key)
 
+        if self._store is not None:
+            # 只写入受影响的 items
+            async with self._lock:
+                changed = [self._items[k] for k in (new_pairs + touched_pairs) if k in self._items]
+            try:
+                await asyncio.to_thread(self._store.upsert_items, changed)
+            except Exception:
+                logger.exception("watchlist store upsert failed")
+
         return new_pairs, touched_pairs
 
     async def touch(
@@ -139,6 +271,11 @@ class WatchlistManager:
                 if key in self._items:
                     self._items.pop(key, None)
                     removed.append(key)
+        if removed and self._store is not None:
+            try:
+                await asyncio.to_thread(self._store.delete_keys, removed)
+            except Exception:
+                logger.exception("watchlist store delete failed")
         return removed
 
     async def prune_expired(self) -> List[Tuple[str, str]]:
@@ -149,6 +286,11 @@ class WatchlistManager:
                 if item.expire_at is not None and item.expire_at <= now:
                     self._items.pop(key, None)
                     removed.append(key)
+        if removed and self._store is not None:
+            try:
+                await asyncio.to_thread(self._store.delete_keys, removed)
+            except Exception:
+                logger.exception("watchlist store delete failed")
         return removed
 
     def snapshot(self) -> List[Dict[str, Any]]:
@@ -231,14 +373,30 @@ class MonitorApiRuntime:
 
     def __init__(self, config_path: Path, debug_config: Optional[DebugConfig] = None, enable_ui: bool = False):
         self.orchestrator = ArbitrageOrchestrator(config_path, debug_config or DebugConfig(), enable_ui=enable_ui)
-        self.watchlist = WatchlistManager(default_exchanges=self.orchestrator.config.exchanges)
+        repo_root = self._guess_repo_root(config_path)
+        store = SqliteWatchlistStore(repo_root / "data" / "monitor_v2_watchlist.sqlite3")
+        self.watchlist = WatchlistManager(default_exchanges=self.orchestrator.config.exchanges, store=store)
         self.subscriptions = SubscriptionController(self.orchestrator)
         self._prune_task: Optional[asyncio.Task] = None
-        self._symbol_order: List[str] = list(self.orchestrator.config.symbols)
+        self._symbol_order: List[str] = list(DEFAULT_BASELINE_SYMBOLS)
         self.started: bool = False
         self.starting: bool = False
         self.start_error: Optional[str] = None
         self.started_at: Optional[float] = None
+
+    @staticmethod
+    def _guess_repo_root(config_path: Path) -> Path:
+        try:
+            resolved = config_path.resolve()
+            # 常见路径：<repo>/config/arbitrage/xxx.yaml
+            for parent in resolved.parents:
+                if parent.name == "config":
+                    return parent.parent
+            if (resolved.parent / "config").exists():
+                return resolved.parent
+        except Exception:
+            pass
+        return Path.cwd()
 
     async def start(self) -> None:
         if self.started or self.starting:
@@ -248,12 +406,24 @@ class MonitorApiRuntime:
         # 过滤：只允许 watchlist 中 active 的 (exchange, symbol) 入队
         self.orchestrator.data_receiver.set_should_accept(self.watchlist.is_active)
 
-        # 预置配置中的 symbols：默认永久关注（防止服务启动即无数据）
-        for symbol in list(self.orchestrator.config.symbols):
-            await self.watchlist.add(symbol=symbol, ttl_seconds=None, source="config", reason="baseline")
+        # 1) 先恢复本地持久化的 watchlist（只恢复未过期的条目）
+        await self.watchlist.load_from_store()
+
+        # 2) 默认只保留 BTC/ETH 两个币种作为初始 baseline（永久关注）
+        for symbol in DEFAULT_BASELINE_SYMBOLS:
+            await self.watchlist.add(symbol=symbol, ttl_seconds=None, source="baseline", reason="default")
+
+        # 3) 避免按配置文件的 symbols 做全量订阅：先清空 config.symbols，再由 watchlist 动态订阅
+        await self.orchestrator.set_symbols([])
 
         try:
             await self.orchestrator.start()
+            # 启动后按 watchlist 对 (exchange, symbol) 做动态订阅
+            for exchange, symbol in self.watchlist.active_pairs():
+                try:
+                    await self.subscriptions.subscribe_pair(exchange, symbol)
+                except Exception:
+                    pass
             await self._refresh_symbols_for_analysis()
             self._prune_task = asyncio.create_task(self._prune_loop())
             self.started = True

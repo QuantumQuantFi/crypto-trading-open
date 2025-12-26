@@ -173,22 +173,29 @@ Monitor/V2 具备异步历史记录能力（避免阻塞主链路）：
   - `POST /watchlist/remove`：手动结束关注（可选指定 exchanges）
   - `GET /watchlist`：查看当前关注列表、到期时间、剩余 TTL、订阅状态
 
+#### 9.2.1 默认关注与重启恢复（已落地）
+- **默认基线**：服务首次启动默认只永久关注 `BTC-USDC-PERP`、`ETH-USDC-PERP`（避免一上来全量订阅导致资源浪费）。
+- **动态扩展**：后续通过 `POST /watchlist/add` 添加其它币种；同一 `symbol` 重复 add 会续命（按 `ttl_seconds` 延长）。
+- **存活规则**：以 `(exchange, symbol)` 为粒度维护 `expire_at`；`expire_at > now` 视为存活；到期后自动回收。
+- **本地持久化**：watchlist 写入 SQLite，重启时自动恢复“未过期”的条目并重新订阅：
+  - DB 文件：`data/monitor_v2_watchlist.sqlite3`
+  - 逻辑入口：`core/services/arbitrage_monitor_v2/api/runtime.py`
+- **配置约定**：启动配置文件里的 `exchanges` 仍作为交易所集合来源；但 `symbols` 不再作为“全量订阅清单”，订阅与分析以 watchlist 的存活条目为准。
+
 ### 9.5 使用方式（服务化 + 可选命令行 UI）
-- 仅服务化（推荐用于评估健康度/低延迟）：`./.venv-py312/bin/python run_monitor_service.py --config config/arbitrage/monitor_v2_ws_only_45.yaml`
-- 同时启用原先 Rich 命令行界面（会有少量终端渲染开销）：`./.venv-py312/bin/python run_monitor_service.py --enable-cli --config config/arbitrage/monitor_v2_ws_only_45.yaml`
+**端口约定（重要）**：后续 Monitor/V2 服务化运行统一使用 **8010 端口**（避免与其它服务默认 8000 端口冲突）。
+
+- 仅服务化（推荐用于评估健康度/低延迟）：`./.venv-py312/bin/python run_monitor_service.py --port 8010 --config config/arbitrage/monitor_v2_ws_only_45.yaml`
+- 同时启用原先 Rich 命令行界面（会有少量终端渲染开销）：`./.venv-py312/bin/python run_monitor_service.py --port 8010 --enable-cli --config config/arbitrage/monitor_v2_ws_only_45.yaml`
 
 ### 9.6 Web Dashboard（低性能开销原则）
 > 目标：把“原命令行界面关注的核心信息（价差/机会）”搬到浏览器里，便于随时查看，同时尽量不引入额外 CPU/内存开销。
 
 - 关键原则：**网页只消费后台已有的分析缓存**（`orchestrator.get_latest_analysis()`），不触发额外的价差计算或订单簿处理。
-- 推送方式：
-  - 首选 `WS /ws/stream`：低频推送（默认 1Hz），每次推送只发送 Top-N（可通过 query 参数调节）。
-  - 自动降级 `GET /ui/data`：当浏览器所在网络环境拦截/超时 WebSocket 握手（Upgrade）时，网页会自动切换为 HTTP 轮询（同样默认 1Hz），保证“看得到数据”。
-  - 网页标签页隐藏时自动暂停请求（减少无意义开销）。
+- 数据获取方式：仅使用 `GET /ui/data` 做低频 HTTP 轮询（默认 1Hz），避免对 WebSocket 的依赖。
 - 常用入口：
-  - `GET /ui`：Dashboard 页面
-  - `GET /ui/data`：Dashboard 轮询数据源（与 WS 同结构的 snapshot）
-  - `WS /ws/stream`：Dashboard 推送数据源
+  - Dashboard 入口：`http://<host>:8010/ui`
+  - Snapshot 数据：`http://<host>:8010/ui/data`
 
 ### 9.7 近期问题与修复（与 90 币种规模化相关）
 - **分析循环空跑/页面全空**：出现 `can't subtract offset-naive and offset-aware datetimes`（交易所时间戳的 tzinfo 混用导致时效性检查抛异常），会使分析循环无法产出 `last_analysis_at/symbol_spreads`，UI 自然显示为空。
@@ -197,6 +204,15 @@ Monitor/V2 具备异步历史记录能力（避免阻塞主链路）：
   - 修复方向：增加 `_ws_is_open()` 做版本兼容判断（同 Binance 的处理方式）。
 - **服务启动卡住（starting=true 很久）**：个别交易所订阅调用可能因网络/交易所问题长时间不返回，导致启动阶段阻塞。
   - 修复方向：订阅阶段增加超时保护（不改变“优先 WS、不回退轮询”的原则，只防止系统被单点阻塞拖死）。
+- **规模压测出现“队列积压/秒级 p95”**：在 45 币种、8 交易所（含 backpack）组合下，`orderbook/ticker` 队列出现明显积压，导致 `p95` 从毫秒级上升到秒级（即数据“在系统内排队”，出现滞后性）。
+  - 结论：根因不是 Web UI；即便不启动 UI/分析循环，仅跑“接收→入队→出队处理”的基准测试也会复现积压。
+  - 定位方法：用 `tools/perf_stream_benchmark.py` 做交易所维度的对照（only / all_except）。
+  - 关键发现（2025-12-26）：
+    - 15 币种（8 交易所全开）`logs/bench_15_latest.txt`：`maxQ(ob/tk)=(427,313)`，`maxP95_ms(ob/tk)=(679.8,675.6)`。
+    - 15 币种（排除 backpack）`logs/bisect_no_backpack.txt`：`maxQ(ob/tk)=(1,0)`，`maxP95_ms(ob/tk)=(4.1,3.8)`（积压基本消失）。
+    - 45 币种（7 交易所：edgex/lighter/paradex/hyperliquid/binance/okx/grvt；排除 backpack）`logs/bench_45_no_backpack_latest.txt`：
+      - `maxQ(ob/tk)=(0,0)`，`maxRPS(ob/tk)=(3422,752)`，`maxP95_ms(ob/tk)=(76.4,86.6)`。
+  - 当前策略：**先暂时排除 backpack**，用 `config/arbitrage/monitor_v2_ws_only_45_no_backpack.yaml` 继续评估其余交易所的 WS 健康度；后续再单独对 backpack 做降频/合并订阅/限深等优化，避免把系统推过处理阈值。
 
 ### 9.3 生命周期与订阅策略（避免 90 币种下的订阅/回退风暴）
 - 关注粒度：以 `(exchange, symbol)` 为单位维护 `expire_at`（满足“同交易所触发才延寿”）
