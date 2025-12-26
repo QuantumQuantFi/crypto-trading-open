@@ -177,6 +177,27 @@ Monitor/V2 具备异步历史记录能力（避免阻塞主链路）：
 - 仅服务化（推荐用于评估健康度/低延迟）：`./.venv-py312/bin/python run_monitor_service.py --config config/arbitrage/monitor_v2_ws_only_45.yaml`
 - 同时启用原先 Rich 命令行界面（会有少量终端渲染开销）：`./.venv-py312/bin/python run_monitor_service.py --enable-cli --config config/arbitrage/monitor_v2_ws_only_45.yaml`
 
+### 9.6 Web Dashboard（低性能开销原则）
+> 目标：把“原命令行界面关注的核心信息（价差/机会）”搬到浏览器里，便于随时查看，同时尽量不引入额外 CPU/内存开销。
+
+- 关键原则：**网页只消费后台已有的分析缓存**（`orchestrator.get_latest_analysis()`），不触发额外的价差计算或订单簿处理。
+- 推送方式：
+  - 首选 `WS /ws/stream`：低频推送（默认 1Hz），每次推送只发送 Top-N（可通过 query 参数调节）。
+  - 自动降级 `GET /ui/data`：当浏览器所在网络环境拦截/超时 WebSocket 握手（Upgrade）时，网页会自动切换为 HTTP 轮询（同样默认 1Hz），保证“看得到数据”。
+  - 网页标签页隐藏时自动暂停请求（减少无意义开销）。
+- 常用入口：
+  - `GET /ui`：Dashboard 页面
+  - `GET /ui/data`：Dashboard 轮询数据源（与 WS 同结构的 snapshot）
+  - `WS /ws/stream`：Dashboard 推送数据源
+
+### 9.7 近期问题与修复（与 90 币种规模化相关）
+- **分析循环空跑/页面全空**：出现 `can't subtract offset-naive and offset-aware datetimes`（交易所时间戳的 tzinfo 混用导致时效性检查抛异常），会使分析循环无法产出 `last_analysis_at/symbol_spreads`，UI 自然显示为空。
+  - 修复方向：在 `DataProcessor.get_orderbook()` 的“时效性检查”中统一用 timestamp 秒数计算；对“naive 但语义为 UTC”的交易所时间戳按 UTC 解释，避免误判过期。
+- **OKX WS 重连异常**：在 websockets v15 中连接对象不再有 `.closed` 属性，旧代码会在重连/状态检查时异常。
+  - 修复方向：增加 `_ws_is_open()` 做版本兼容判断（同 Binance 的处理方式）。
+- **服务启动卡住（starting=true 很久）**：个别交易所订阅调用可能因网络/交易所问题长时间不返回，导致启动阶段阻塞。
+  - 修复方向：订阅阶段增加超时保护（不改变“优先 WS、不回退轮询”的原则，只防止系统被单点阻塞拖死）。
+
 ### 9.3 生命周期与订阅策略（避免 90 币种下的订阅/回退风暴）
 - 关注粒度：以 `(exchange, symbol)` 为单位维护 `expire_at`（满足“同交易所触发才延寿”）
 - 自动回收：后台任务周期性清理过期项，并尝试 `unsubscribe`（若交易所不支持 unsubscribe，则至少“停止入队/停止参与分析”）
