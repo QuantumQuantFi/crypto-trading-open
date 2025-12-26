@@ -133,7 +133,7 @@ class OKXWebSocket(OKXBase):
     async def _connect_public_stream(self) -> bool:
         """连接公共数据流"""
         try:
-            if self._public_websocket and not self._public_websocket.closed:
+            if self._public_websocket and self._ws_is_open(self._public_websocket):
                 return True
             
             if self.logger:
@@ -155,6 +155,23 @@ class OKXWebSocket(OKXBase):
             if self.logger:
                 self.logger.error(f"❌ 连接公共数据流失败: {str(e)}")
             return False
+
+    def _ws_is_open(self, ws) -> bool:
+        """兼容 websockets 版本差异的连接状态判断（v15 ClientConnection 没有 .closed）。"""
+        if not ws:
+            return False
+        state = getattr(ws, "state", None)
+        if state is not None:
+            try:
+                from websockets.protocol import State
+                return state == State.OPEN
+            except Exception:
+                return str(state).endswith("OPEN") or state == 1
+        closed = getattr(ws, "closed", None)
+        if isinstance(closed, bool):
+            return not closed
+        close_code = getattr(ws, "close_code", None)
+        return close_code is None
     
     async def _connect_private_stream(self) -> bool:
         """连接私有数据流"""
@@ -803,9 +820,9 @@ class OKXWebSocket(OKXBase):
     @property
     def is_connected(self) -> bool:
         """检查公共数据流连接状态"""
-        return self._public_connected and self._public_websocket and not self._public_websocket.closed
+        return self._public_connected and self._public_websocket and self._ws_is_open(self._public_websocket)
     
     @property
     def is_private_connected(self) -> bool:
         """检查私有数据流连接状态"""
-        return self._private_connected and self._private_websocket and not self._private_websocket.closed and self._authenticated
+        return self._private_connected and self._private_websocket and self._ws_is_open(self._private_websocket) and self._authenticated

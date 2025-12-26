@@ -91,6 +91,118 @@ def create_app(config_path: Path, enable_ui: bool = False) -> FastAPI:
     async def ui() -> HTMLResponse:
         return HTMLResponse(render_monitor_ui_html())
 
+    async def _build_dashboard_snapshot(
+        *,
+        interval_ms: int,
+        top_spreads: int,
+        top_opps: int,
+        symbol_like: Optional[str],
+        min_abs_spread_pct: Optional[float],
+    ) -> Dict[str, Any]:
+        interval_ms = max(int(interval_ms or 1000), 200)
+        top_spreads = max(min(int(top_spreads or 200), 2000), 0)
+        top_opps = max(min(int(top_opps or 50), 500), 0)
+        symbol_like_norm = (symbol_like or "").strip().upper()
+        min_abs = None if min_abs_spread_pct is None else float(min_abs_spread_pct)
+
+        now = time.time()
+        if not runtime.started:
+            return {
+                "type": "snapshot",
+                "generated_at": now,
+                "started": runtime.started,
+                "starting": runtime.starting,
+                "start_error": runtime.start_error,
+                "watchlist_pairs": len(runtime.watchlist.active_pairs()),
+                "analysis_age_ms": None,
+                "last_analysis_at": None,
+                "symbols_with_spreads": 0,
+                "opportunities_count": 0,
+                "top_spreads": top_spreads,
+                "top_opps": top_opps,
+                "opportunities": [],
+                "top_spread_rows": [],
+                "queue_info": "starting",
+            }
+
+        analysis = await runtime.orchestrator.get_latest_analysis()
+        last_at = analysis.get("last_analysis_at")
+        analysis_age_ms = None if not last_at else max((now - float(last_at)) * 1000, 0.0)
+
+        opps: List[Dict[str, Any]] = list(analysis.get("opportunities") or [])
+        if symbol_like_norm:
+            opps = [o for o in opps if symbol_like_norm in str(o.get("symbol", "")).upper()]
+        opps.sort(key=lambda o: abs(_safe_float(o.get("spread_pct"), 0.0)), reverse=True)
+        if top_opps:
+            opps = opps[:top_opps]
+        else:
+            opps = []
+
+        symbol_spreads: Dict[str, List[Dict[str, Any]]] = dict(analysis.get("symbol_spreads") or {})
+
+        def _iter_spreads():
+            for sym, rows in symbol_spreads.items():
+                if symbol_like_norm and symbol_like_norm not in sym.upper():
+                    continue
+                for r in rows or []:
+                    pct = _safe_float(r.get("spread_pct"), 0.0)
+                    if min_abs is not None and abs(pct) < min_abs:
+                        continue
+                    yield r
+
+        top_rows: List[Dict[str, Any]] = []
+        if top_spreads > 0:
+            top_rows = heapq.nlargest(
+                top_spreads,
+                _iter_spreads(),
+                key=lambda r: abs(_safe_float(r.get("spread_pct"), 0.0)),
+            )
+
+        stats = runtime.orchestrator.get_stats()
+        proc_stats = stats.get("data_processor") or {}
+        queue_info = (
+            f"ob_q={proc_stats.get('orderbook_queue_size', '-')}"
+            f"(peak={proc_stats.get('orderbook_queue_peak', '-')}) "
+            f"tk_q={proc_stats.get('ticker_queue_size', '-')}"
+            f"(peak={proc_stats.get('ticker_queue_peak', '-')}) "
+            f"ob_p95={_safe_float(proc_stats.get('orderbook_delay_p95_ms'), 0.0):.1f}ms "
+            f"tk_p95={_safe_float(proc_stats.get('ticker_delay_p95_ms'), 0.0):.1f}ms"
+        )
+
+        return {
+            "type": "snapshot",
+            "generated_at": now,
+            "started": runtime.started,
+            "starting": runtime.starting,
+            "start_error": runtime.start_error,
+            "watchlist_pairs": len(runtime.watchlist.active_pairs()),
+            "analysis_age_ms": analysis_age_ms,
+            "last_analysis_at": last_at,
+            "symbols_with_spreads": len(symbol_spreads),
+            "opportunities_count": len(analysis.get("opportunities") or []),
+            "top_spreads": top_spreads,
+            "top_opps": top_opps,
+            "opportunities": opps,
+            "top_spread_rows": top_rows,
+            "queue_info": queue_info,
+        }
+
+    @app.get("/ui/data")
+    async def ui_data(
+        interval_ms: int = Query(default=1000),
+        top_spreads: int = Query(default=200),
+        top_opps: int = Query(default=50),
+        symbol_like: Optional[str] = Query(default=None),
+        min_abs_spread_pct: Optional[float] = Query(default=None),
+    ) -> Dict[str, Any]:
+        return await _build_dashboard_snapshot(
+            interval_ms=interval_ms,
+            top_spreads=top_spreads,
+            top_opps=top_opps,
+            symbol_like=symbol_like,
+            min_abs_spread_pct=min_abs_spread_pct,
+        )
+
     @app.get("/watchlist")
     async def get_watchlist() -> Dict[str, Any]:
         return {"items": runtime.watchlist.snapshot()}
@@ -186,99 +298,16 @@ def create_app(config_path: Path, enable_ui: bool = False) -> FastAPI:
         symbol_like: Optional[str] = None,
         min_abs_spread_pct: Optional[float] = None,
     ) -> None:
-        interval_ms = max(int(interval_ms or 1000), 200)
-        top_spreads = max(min(int(top_spreads or 200), 2000), 0)
-        top_opps = max(min(int(top_opps or 50), 500), 0)
-        symbol_like_norm = (symbol_like or "").strip().upper()
-        min_abs = None if min_abs_spread_pct is None else float(min_abs_spread_pct)
-
         await websocket.accept()
         try:
             while True:
-                now = time.time()
-                if not runtime.started:
-                    payload: Dict[str, Any] = {
-                        "type": "snapshot",
-                        "generated_at": now,
-                        "started": runtime.started,
-                        "starting": runtime.starting,
-                        "start_error": runtime.start_error,
-                        "watchlist_pairs": len(runtime.watchlist.active_pairs()),
-                        "analysis_age_ms": None,
-                        "last_analysis_at": None,
-                        "symbols_with_spreads": 0,
-                        "opportunities_count": 0,
-                        "top_spreads": top_spreads,
-                        "top_opps": top_opps,
-                        "opportunities": [],
-                        "top_spread_rows": [],
-                        "queue_info": "starting",
-                    }
-                    await websocket.send_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-                    await asyncio.sleep(interval_ms / 1000)
-                    continue
-
-                analysis = await runtime.orchestrator.get_latest_analysis()
-                last_at = analysis.get("last_analysis_at")
-                analysis_age_ms = None if not last_at else max((now - float(last_at)) * 1000, 0.0)
-
-                opps: List[Dict[str, Any]] = list(analysis.get("opportunities") or [])
-                if symbol_like_norm:
-                    opps = [o for o in opps if symbol_like_norm in str(o.get("symbol", "")).upper()]
-                opps.sort(key=lambda o: abs(_safe_float(o.get("spread_pct"), 0.0)), reverse=True)
-                if top_opps:
-                    opps = opps[:top_opps]
-                else:
-                    opps = []
-
-                symbol_spreads: Dict[str, List[Dict[str, Any]]] = dict(analysis.get("symbol_spreads") or {})
-
-                def _iter_spreads():
-                    for sym, rows in symbol_spreads.items():
-                        if symbol_like_norm and symbol_like_norm not in sym.upper():
-                            continue
-                        for r in rows or []:
-                            pct = _safe_float(r.get("spread_pct"), 0.0)
-                            if min_abs is not None and abs(pct) < min_abs:
-                                continue
-                            yield r
-
-                top_rows: List[Dict[str, Any]] = []
-                if top_spreads > 0:
-                    top_rows = heapq.nlargest(
-                        top_spreads,
-                        _iter_spreads(),
-                        key=lambda r: abs(_safe_float(r.get("spread_pct"), 0.0)),
-                    )
-
-                stats = runtime.orchestrator.get_stats()
-                proc_stats = stats.get("data_processor") or {}
-                queue_info = (
-                    f"ob_q={proc_stats.get('orderbook_queue_size', '-')}"
-                    f"(peak={proc_stats.get('orderbook_queue_peak', '-')}) "
-                    f"tk_q={proc_stats.get('ticker_queue_size', '-')}"
-                    f"(peak={proc_stats.get('ticker_queue_peak', '-')}) "
-                    f"ob_p95={_safe_float(proc_stats.get('orderbook_delay_p95_ms'), 0.0):.1f}ms "
-                    f"tk_p95={_safe_float(proc_stats.get('ticker_delay_p95_ms'), 0.0):.1f}ms"
+                payload = await _build_dashboard_snapshot(
+                    interval_ms=interval_ms,
+                    top_spreads=top_spreads,
+                    top_opps=top_opps,
+                    symbol_like=symbol_like,
+                    min_abs_spread_pct=min_abs_spread_pct,
                 )
-
-                payload = {
-                    "type": "snapshot",
-                    "generated_at": now,
-                    "started": runtime.started,
-                    "starting": runtime.starting,
-                    "start_error": runtime.start_error,
-                    "watchlist_pairs": len(runtime.watchlist.active_pairs()),
-                    "analysis_age_ms": analysis_age_ms,
-                    "last_analysis_at": last_at,
-                    "symbols_with_spreads": len(symbol_spreads),
-                    "opportunities_count": len(analysis.get("opportunities") or []),
-                    "top_spreads": top_spreads,
-                    "top_opps": top_opps,
-                    "opportunities": opps,
-                    "top_spread_rows": top_rows,
-                    "queue_info": queue_info,
-                }
                 await websocket.send_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 await asyncio.sleep(interval_ms / 1000)
         except WebSocketDisconnect:

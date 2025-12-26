@@ -50,8 +50,18 @@ class ArbitrageOpportunity:
     
     def update_duration(self):
         """更新持续时间"""
-        self.last_seen = datetime.now()
-        self.duration_seconds = (self.last_seen - self.first_seen).total_seconds()
+        # 兼容“naive/aware datetime 混用”场景：统一让 last_seen 跟随 first_seen 的 tzinfo
+        # 之前在规模化运行时出现过：can't subtract offset-naive and offset-aware datetimes
+        tz = getattr(self.first_seen, "tzinfo", None)
+        self.last_seen = datetime.now(tz=tz) if tz else datetime.now()
+        try:
+            self.duration_seconds = (self.last_seen - self.first_seen).total_seconds()
+        except TypeError:
+            # 兜底：若仍出现 tz 混用，转为 timestamp 计算
+            try:
+                self.duration_seconds = float(self.last_seen.timestamp() - self.first_seen.timestamp())
+            except Exception:
+                self.duration_seconds = 0.0
     
     def get_opportunity_key(self) -> str:
         """获取机会的唯一标识"""
@@ -306,4 +316,3 @@ class OpportunityFinder:
     def clear(self):
         """清空所有机会"""
         self.opportunities.clear()
-

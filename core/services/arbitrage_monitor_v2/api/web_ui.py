@@ -151,7 +151,7 @@ def render_monitor_ui_html() -> str:
         </div>
       </div>
       <div class="footer">
-        推送源：/ws/stream（默认1Hz）；建议只开少量浏览器标签页，避免额外网络/序列化开销。
+        默认优先使用 WebSocket 推送（`/ws/stream`）；若网络环境拦截 WS Upgrade，则自动降级为 HTTP 轮询（`/ui/data`）。
       </div>
     </main>
 
@@ -177,9 +177,11 @@ def render_monitor_ui_html() -> str:
       };
 
       let ws = null;
-      let reconnectTimer = null;
+      let pollTimer = null;
+      let wsHandshakeTimer = null;
+      let lastMsgAt = 0;
 
-      function buildWsUrl() {
+      function buildQuery() {
         const intervalMs = parseInt(el("intervalMs").value || "1000", 10);
         const sym = (el("symbolFilter").value || "").trim();
         const minAbs = (el("minAbsPct").value || "").trim();
@@ -190,9 +192,19 @@ def render_monitor_ui_html() -> str:
         qs.set("top_opps", "50");
         if (sym.length) qs.set("symbol_like", sym);
         if (minAbs.length) qs.set("min_abs_spread_pct", minAbs);
+        return { intervalMs, qs };
+      }
+
+      function buildWsUrl() {
+        const { qs } = buildQuery();
 
         const proto = (location.protocol === "https:") ? "wss" : "ws";
         return `${proto}://${location.host}/ws/stream?${qs.toString()}`;
+      }
+
+      function buildHttpUrl() {
+        const { qs } = buildQuery();
+        return `${location.origin}/ui/data?${qs.toString()}`;
       }
 
       function setConnState(state, ok) {
@@ -200,12 +212,22 @@ def render_monitor_ui_html() -> str:
         el("statusDot").style.background = ok ? "var(--good)" : "var(--warn)";
       }
 
-      function scheduleReconnect() {
-        if (reconnectTimer) return;
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          connect();
-        }, 800);
+      function stopPolling() {
+        if (pollTimer) {
+          clearTimeout(pollTimer);
+          pollTimer = null;
+        }
+      }
+
+      function stopWs() {
+        if (wsHandshakeTimer) {
+          clearTimeout(wsHandshakeTimer);
+          wsHandshakeTimer = null;
+        }
+        if (ws) {
+          try { ws.close(); } catch (_) {}
+          ws = null;
+        }
       }
 
       function renderRows(tbody, rows) {
@@ -243,31 +265,73 @@ def render_monitor_ui_html() -> str:
         renderRows(el("spreadsBody"), p.top_spread_rows || []);
       }
 
+      async function fetchSnapshotOnce() {
+        const url = buildHttpUrl();
+        const r = await fetch(url, { cache: "no-store" });
+        if (!r.ok) throw new Error(`http ${r.status}`);
+        const p = await r.json();
+        if (p && p.type === "snapshot") applyPayload(p);
+      }
+
+      function startPolling() {
+        stopWs();
+        stopPolling();
+        setConnState("polling", true);
+        const { intervalMs } = buildQuery();
+
+        const loop = async () => {
+          if (document.hidden) {
+            pollTimer = setTimeout(loop, intervalMs);
+            return;
+          }
+          try {
+            await fetchSnapshotOnce();
+          } catch (_) {}
+          pollTimer = setTimeout(loop, intervalMs);
+        };
+        loop();
+      }
+
       function connect() {
-        if (ws) {
-          try { ws.close(); } catch (_) {}
-          ws = null;
-        }
+        stopPolling();
+        stopWs();
         setConnState("connecting", false);
 
         const url = buildWsUrl();
         ws = new WebSocket(url);
 
+        lastMsgAt = 0;
+        wsHandshakeTimer = setTimeout(() => {
+          // 外网/代理环境常见：WS Upgrade 被拦截或超时；此时自动降级为轮询
+          if (!lastMsgAt) startPolling();
+        }, 2000);
+
         ws.onopen = () => setConnState("connected", true);
-        ws.onclose = () => { setConnState("closed", false); scheduleReconnect(); };
-        ws.onerror = () => { setConnState("error", false); scheduleReconnect(); };
+        ws.onclose = () => startPolling();
+        ws.onerror = () => startPolling();
         ws.onmessage = (ev) => {
           try {
             const p = JSON.parse(ev.data);
-            if (p && p.type === "snapshot") applyPayload(p);
+            if (p && p.type === "snapshot") {
+              lastMsgAt = Date.now();
+              applyPayload(p);
+            }
           } catch (_) {}
         };
       }
 
       el("applyBtn").addEventListener("click", () => connect());
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          stopPolling();
+          stopWs();
+          setConnState("paused", false);
+        } else {
+          connect();
+        }
+      });
       connect();
     </script>
   </body>
 </html>
 """
-
