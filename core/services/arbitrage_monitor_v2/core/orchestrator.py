@@ -412,7 +412,11 @@ class ArbitrageOrchestrator:
                     async with self._symbols_lock:
                         symbols_snapshot = list(self.config.symbols)
 
-                    for symbol in symbols_snapshot:
+                    for idx, symbol in enumerate(symbols_snapshot):
+                        # 避免分析循环长时间占用事件循环导致数据处理协程“抢不到时间片”
+                        # 在规模化订阅/行情高频时，适当让出执行权可显著降低队列积压与处理延迟
+                        if idx % 3 == 0:
+                            await asyncio.sleep(0)
                         # 收集该交易对在各交易所的订单簿
                         orderbooks = {}
                         for exchange in self.config.exchanges:
