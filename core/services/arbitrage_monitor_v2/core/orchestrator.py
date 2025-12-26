@@ -136,6 +136,10 @@ class ArbitrageOrchestrator:
         # 🎯 UI更新节流（避免每次分析都更新UI导致卡顿）
         self.last_ui_update_time: float = 0
         self.ui_update_interval: float = 1.0  # UI数据更新间隔（秒）
+
+        # 分析异常堆栈限频（避免规模化时刷爆日志）
+        self._analysis_trace_last_log_time: float = 0.0
+        self._analysis_trace_log_interval: float = 30.0
         
         # 任务列表
         self.tasks: List[asyncio.Task] = []
@@ -522,7 +526,18 @@ class ArbitrageOrchestrator:
                     if self.debug.is_debug_enabled() and self.ui_manager:
                         self.ui_manager.add_debug_message(f"❌ 分析错误: {e}")
                     else:
-                        logger.warning("分析循环错误: %s", e, exc_info=self.debug.is_debug_enabled())
+                        # 特定异常（时区 naive/aware 混用）在规模化场景会高频出现，默认不打印堆栈；
+                        # 但为了便于定位，限频打印一次堆栈到日志文件。
+                        msg = str(e)
+                        if "offset-naive and offset-aware" in msg:
+                            now = time.time()
+                            if (now - self._analysis_trace_last_log_time) >= self._analysis_trace_log_interval:
+                                self._analysis_trace_last_log_time = now
+                                logger.warning("分析循环错误(含堆栈,限频): %s", e, exc_info=True)
+                            else:
+                                logger.warning("分析循环错误: %s", e, exc_info=False)
+                        else:
+                            logger.warning("分析循环错误: %s", e, exc_info=self.debug.is_debug_enabled())
                     await asyncio.sleep(0.1)
                     
         except asyncio.CancelledError:
