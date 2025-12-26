@@ -341,6 +341,7 @@ class DataProcessor:
         
         # 🔥 时效性检查：需要同时满足“交易所时间戳”和“本地接收时间”两种约束
         now = datetime.now()
+        now_ts = time.time()
         exchange_timestamp = (
             getattr(orderbook, 'exchange_timestamp', None)
             or getattr(orderbook, 'timestamp', None)
@@ -352,7 +353,13 @@ class DataProcessor:
         
         # 优先验证交易所原始时间戳
         if exchange_timestamp:
-            exchange_age = (now - exchange_timestamp).total_seconds()
+            try:
+                if isinstance(exchange_timestamp, (int, float)):
+                    exchange_age = now_ts - float(exchange_timestamp)
+                else:
+                    exchange_age = now_ts - float(exchange_timestamp.timestamp())
+            except Exception:
+                exchange_age = (now - exchange_timestamp).total_seconds()
             if exchange_age > max_age_seconds:
                 self._log_stale_orderbook(
                     exchange=exchange,
@@ -366,9 +373,12 @@ class DataProcessor:
         # 其次验证本地接收时间
         if received_timestamp:
             if isinstance(received_timestamp, (int, float)):
-                local_age = time.time() - float(received_timestamp)
+                local_age = now_ts - float(received_timestamp)
             else:
-                local_age = (now - received_timestamp).total_seconds()
+                try:
+                    local_age = now_ts - float(received_timestamp.timestamp())
+                except Exception:
+                    local_age = (now - received_timestamp).total_seconds()
             if local_age > max_age_seconds:
                 self._log_stale_orderbook(
                     exchange=exchange,
