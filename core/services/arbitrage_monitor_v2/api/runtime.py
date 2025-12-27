@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from ..core.orchestrator import ArbitrageOrchestrator
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASELINE_SYMBOLS = ["BTC-USDC-PERP", "ETH-USDC-PERP"]
+DEFAULT_WATCHLIST_TTL_SECONDS = 3600
 
 
 @dataclass
@@ -194,7 +196,7 @@ class WatchlistManager:
         self,
         symbol: str,
         exchanges: Optional[List[str]] = None,
-        ttl_seconds: Optional[int] = 86400,
+        ttl_seconds: Optional[int] = DEFAULT_WATCHLIST_TTL_SECONDS,
         source: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
@@ -227,7 +229,7 @@ class WatchlistManager:
                     if existing.expire_at is None or expire_at is None:
                         existing.expire_at = None
                     else:
-                        existing.expire_at = max(existing.expire_at, expire_at)
+                        existing.expire_at = expire_at
                     touched_pairs.append(key)
 
         if self._store is not None:
@@ -245,7 +247,7 @@ class WatchlistManager:
         self,
         exchange: str,
         symbol: str,
-        ttl_seconds: int = 86400,
+        ttl_seconds: int = DEFAULT_WATCHLIST_TTL_SECONDS,
         source: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> bool:
@@ -323,6 +325,17 @@ class SubscriptionController:
         self._sem = asyncio.Semaphore(max_concurrent)
         self._subscribed: Set[Tuple[str, str]] = set()  # (exchange, std_symbol)
 
+    @staticmethod
+    def _read_orderbook_depth() -> Optional[int]:
+        raw = os.getenv("MONITOR_ORDERBOOK_DEPTH")
+        if not raw:
+            return None
+        try:
+            depth = int(str(raw).strip())
+        except Exception:
+            return None
+        return depth if depth > 0 else None
+
     async def subscribe_pair(self, exchange: str, std_symbol: str) -> None:
         key = (exchange, std_symbol)
         if key in self._subscribed:
@@ -341,7 +354,14 @@ class SubscriptionController:
             tk_cb = self._orchestrator.data_receiver._create_ticker_callback(exchange)
 
             if hasattr(adapter, "subscribe_orderbook"):
-                await adapter.subscribe_orderbook(exchange_symbol, callback=ob_cb)
+                depth = self._read_orderbook_depth()
+                if depth is None:
+                    await adapter.subscribe_orderbook(exchange_symbol, callback=ob_cb)
+                else:
+                    try:
+                        await adapter.subscribe_orderbook(exchange_symbol, callback=ob_cb, depth=depth)
+                    except TypeError:
+                        await adapter.subscribe_orderbook(exchange_symbol, callback=ob_cb)
             if hasattr(adapter, "subscribe_ticker"):
                 await adapter.subscribe_ticker(exchange_symbol, callback=tk_cb)
 
@@ -469,7 +489,7 @@ class MonitorApiRuntime:
         self,
         symbol: str,
         exchanges: Optional[List[str]] = None,
-        ttl_seconds: int = 86400,
+        ttl_seconds: int = DEFAULT_WATCHLIST_TTL_SECONDS,
         source: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -505,7 +525,7 @@ class MonitorApiRuntime:
         self,
         exchange: str,
         symbol: str,
-        ttl_seconds: int = 86400,
+        ttl_seconds: int = DEFAULT_WATCHLIST_TTL_SECONDS,
         source: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> Dict[str, Any]:

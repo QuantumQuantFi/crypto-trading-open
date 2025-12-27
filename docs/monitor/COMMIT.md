@@ -6,7 +6,7 @@
 ## 变更背景
 - 线上环境经常已有其它服务占用 `8000`，Monitor/V2 统一改用 `8010`。
 - 初期只需要关注 BTC/ETH，后续币种由外部系统通过 API 动态添加。
-- 需要本地持久化 watchlist，确保服务重启后能继续关注“仍在 24h TTL 内”的币种。
+- 需要本地持久化 watchlist，确保服务重启后能继续关注“仍在 1h TTL 内”的币种。
 - Web UI 不再依赖 WebSocket，避免网络环境对 WS 的限制。
 
 ## 主要改动
@@ -21,8 +21,8 @@
   - 记录 8010 端口约定、默认 BTC/ETH、SQLite 持久化与重启恢复策略
 
 ## 接口使用（关键）
-- 新增关注（默认 24h）：`POST /watchlist/add`（`ttl_seconds=86400`）
-- 续命（单所单币）：`POST /watchlist/touch`（`ttl_seconds=86400`）
+- 新增关注（默认 1h）：`POST /watchlist/add`（`ttl_seconds=3600`）
+- 续命（单所单币）：`POST /watchlist/touch`（`ttl_seconds=3600`）
 - 查看当前存活：`GET /watchlist`
 
 ## 验证方式（手工）
@@ -33,4 +33,3 @@
   1) `POST /watchlist/add` 添加一个新币种（如 SOL）
   2) 重启服务
   3) `GET /watchlist` 确认 SOL 仍存在且 TTL 未过期
-

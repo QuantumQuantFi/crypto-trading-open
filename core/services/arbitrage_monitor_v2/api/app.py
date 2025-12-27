@@ -9,14 +9,14 @@ import asyncio
 import json
 import heapq
 
-from .runtime import MonitorApiRuntime
+from .runtime import MonitorApiRuntime, DEFAULT_WATCHLIST_TTL_SECONDS
 from .web_ui import render_monitor_ui_html
 
 
 class WatchAddRequest(BaseModel):
     symbol: str = Field(..., description="标准符号，例如 BTC-USDC-PERP")
     exchanges: Optional[List[str]] = Field(default=None, description="为空表示所有已配置交易所")
-    ttl_seconds: int = Field(default=86400, ge=60, description="默认关注 24h")
+    ttl_seconds: int = Field(default=DEFAULT_WATCHLIST_TTL_SECONDS, ge=60, description="默认关注 1h")
     source: Optional[str] = None
     reason: Optional[str] = None
 
@@ -24,7 +24,7 @@ class WatchAddRequest(BaseModel):
 class WatchTouchRequest(BaseModel):
     exchange: str
     symbol: str
-    ttl_seconds: int = Field(default=86400, ge=60)
+    ttl_seconds: int = Field(default=DEFAULT_WATCHLIST_TTL_SECONDS, ge=60)
     source: Optional[str] = None
     reason: Optional[str] = None
 
@@ -106,6 +106,9 @@ def create_app(config_path: Path, enable_ui: bool = False) -> FastAPI:
         min_abs = None if min_abs_spread_pct is None else float(min_abs_spread_pct)
 
         now = time.time()
+        watch_pairs = runtime.watchlist.active_pairs()
+        watchlist_exchanges = sorted({e for e, _ in watch_pairs})
+        watchlist_symbols = sorted({s for _, s in watch_pairs})
         if not runtime.started:
             return {
                 "type": "snapshot",
@@ -113,7 +116,9 @@ def create_app(config_path: Path, enable_ui: bool = False) -> FastAPI:
                 "started": runtime.started,
                 "starting": runtime.starting,
                 "start_error": runtime.start_error,
-                "watchlist_pairs": len(runtime.watchlist.active_pairs()),
+                "watchlist_pairs": len(watch_pairs),
+                "watchlist_exchanges": watchlist_exchanges,
+                "watchlist_symbols": watchlist_symbols,
                 "analysis_age_ms": None,
                 "last_analysis_at": None,
                 "symbols_with_spreads": 0,
@@ -175,7 +180,9 @@ def create_app(config_path: Path, enable_ui: bool = False) -> FastAPI:
             "started": runtime.started,
             "starting": runtime.starting,
             "start_error": runtime.start_error,
-            "watchlist_pairs": len(runtime.watchlist.active_pairs()),
+            "watchlist_pairs": len(watch_pairs),
+            "watchlist_exchanges": watchlist_exchanges,
+            "watchlist_symbols": watchlist_symbols,
             "analysis_age_ms": analysis_age_ms,
             "last_analysis_at": last_at,
             "symbols_with_spreads": len(symbol_spreads),

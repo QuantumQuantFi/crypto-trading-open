@@ -54,11 +54,16 @@ def render_monitor_ui_html() -> str:
       .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); font-size: 11px; font-family: var(--mono); }
       .small { font-size: 11px; color: var(--muted); font-family: var(--mono); }
       .footer { margin-top: 10px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+      .watchlist { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; margin-top: 10px; }
+      .watchlistBox { border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: rgba(255,255,255,.02); }
+      .taglist { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+      .tag { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; font-size: 11px; font-family: var(--mono); color: var(--text); }
       @media (max-width: 980px) {
         .row { grid-template-columns: 1fr; }
         .tables { grid-template-columns: 1fr; }
         .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .controls { grid-template-columns: 1fr 1fr; }
+        .watchlist { grid-template-columns: 1fr; }
         th { top: 104px; }
       }
     </style>
@@ -92,6 +97,16 @@ def render_monitor_ui_html() -> str:
               <option value="2000">2000ms</option>
             </select>
             <button id="applyBtn">应用 / 重连</button>
+          </div>
+          <div class="watchlist">
+            <div class="watchlistBox">
+              <div class="k">当前关注的交易所</div>
+              <div class="taglist" id="watchExchanges"></div>
+            </div>
+            <div class="watchlistBox">
+              <div class="k">当前关注的币种清单</div>
+              <div class="taglist" id="watchSymbols"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -175,6 +190,13 @@ def render_monitor_ui_html() -> str:
           return (v / 1000).toFixed(2) + "s";
         }
       };
+      const esc = (v) => String(v).replace(/[&<>"']/g, (m) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+      })[m]);
 
       let pollTimer = null;
 
@@ -225,6 +247,14 @@ def render_monitor_ui_html() -> str:
         tbody.innerHTML = html;
       }
 
+      function renderTags(target, items) {
+        if (!items || items.length === 0) {
+          target.innerHTML = `<span class="small">-</span>`;
+          return;
+        }
+        target.innerHTML = items.map(i => `<span class="tag">${esc(i)}</span>`).join("");
+      }
+
       function applyPayload(p) {
         const now = Date.now();
         el("clock").textContent = "  " + new Date(now).toLocaleString();
@@ -242,6 +272,8 @@ def render_monitor_ui_html() -> str:
 
         renderRows(el("oppsBody"), p.opportunities || []);
         renderRows(el("spreadsBody"), p.top_spread_rows || []);
+        renderTags(el("watchExchanges"), p.watchlist_exchanges || []);
+        renderTags(el("watchSymbols"), p.watchlist_symbols || []);
       }
 
       async function fetchSnapshotOnce() {
