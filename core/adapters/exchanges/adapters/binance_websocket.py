@@ -50,6 +50,12 @@ class BinanceWebSocket(BinanceBase):
         self._subscriptions = {}  # stream_name -> callback (现货)
         self._futures_subscriptions = {}  # stream_name -> callback (永续)
         self._user_subscriptions = {}  # event_type -> callback
+        # futures !miniTicker@arr：用于给系统提供 last/open/high/low/volume 等（避免 per-symbol @ticker 订阅风控）
+        self._futures_miniticker_subscribed: bool = False
+        # futures bookTicker：按 symbol 订阅，保证单个 symbol 更新足够频繁（/snapshot 默认 2s 过期过滤）
+        self._futures_bookticker_streams: Set[str] = set()  # e.g. "btcusdt@bookTicker"
+        self._futures_pending_subscribe: Set[str] = set()
+        self._futures_subscribe_flush_task: Optional[asyncio.Task] = None
         self._stream_id_counter = 1
         self._futures_stream_id_counter = 1
         
@@ -71,10 +77,45 @@ class BinanceWebSocket(BinanceBase):
         # 数据缓存
         self._ticker_cache = {}
         self._orderbook_cache = {}
+        # stream_name -> 内部标准 symbol（用于把 WS 返回的 BTCUSDT 映射回 BTC-USDC-PERP 等）
+        self._stream_symbol_map: Dict[str, str] = {}
         
         # 事件循环任务
         self._heartbeat_task = None
         self._listen_key_task = None
+
+    async def _flush_futures_subscriptions(self) -> None:
+        """短时间聚合 SUBSCRIBE 请求，避免启动/动态订阅时大量单条 SUBSCRIBE 触发风控/断线。"""
+        try:
+            await asyncio.sleep(0.05)
+            if not self._futures_websocket:
+                return
+            if not self._futures_pending_subscribe:
+                return
+
+            streams = list(self._futures_pending_subscribe)
+            self._futures_pending_subscribe.clear()
+
+            chunk_size = 200
+            for i in range(0, len(streams), chunk_size):
+                chunk = streams[i : i + chunk_size]
+                subscribe_msg = {
+                    "method": "SUBSCRIBE",
+                    "params": chunk,
+                    "id": self._futures_stream_id_counter,
+                }
+                self._futures_stream_id_counter += 1
+                await self._futures_websocket.send(json.dumps(subscribe_msg))
+        finally:
+            self._futures_subscribe_flush_task = None
+
+    def _schedule_futures_subscribe(self, stream_name: str) -> None:
+        if stream_name in self._futures_bookticker_streams:
+            return
+        self._futures_bookticker_streams.add(stream_name)
+        self._futures_pending_subscribe.add(stream_name)
+        if self._futures_subscribe_flush_task is None:
+            self._futures_subscribe_flush_task = asyncio.create_task(self._flush_futures_subscriptions())
         
     async def initialize(self) -> bool:
         """初始化WebSocket连接"""
@@ -305,9 +346,10 @@ class BinanceWebSocket(BinanceBase):
                         # 调用回调
                         if stream_name in self._subscriptions:
                             callback = self._subscriptions[stream_name]
+                            internal_symbol = self._stream_symbol_map.get(stream_name) or data.get('s', '')
                             # 构建 TickerData
                             ticker = TickerData(
-                                symbol=data.get('s', ''),
+                                symbol=internal_symbol,
                                 bid=self._safe_decimal(data.get('b')),
                                 ask=self._safe_decimal(data.get('a')),
                                 last=self._safe_decimal(data.get('c')),
@@ -344,6 +386,12 @@ class BinanceWebSocket(BinanceBase):
             async for message in self._futures_websocket:
                 try:
                     data = json.loads(message)
+                    # Binance 的 *arr 流会返回 list[dict]
+                    if isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, dict):
+                                await self._process_market_message(item, is_futures=True)
+                        continue
                     await self._process_market_message(data, is_futures=True)
                 except json.JSONDecodeError:
                     if self.logger:
@@ -412,10 +460,36 @@ class BinanceWebSocket(BinanceBase):
                 stream_name = data['stream']
                 message_data = data['data']
             elif 'e' in data and 's' in data:
-                # 格式2: 直接ticker格式 {'e': '24hrTicker', 's': 'BTCUSDT', ...}
-                # 构造stream_name用于回调查找
+                # 格式2: 直接事件格式（/ws + SUBSCRIBE 时可能返回 raw event）
+                # 需要根据 event_type 构造 stream_name，才能命中订阅回调/内部 symbol 映射。
+                event_type = data.get('e')
                 symbol = data.get('s', '').lower()
-                stream_name = f"{symbol}@ticker"
+                if not symbol:
+                    return
+
+                message_data = data
+                stream_name = None
+
+                if event_type == 'bookTicker':
+                    stream_name = f"{symbol}@bookTicker"
+                elif event_type == 'depthUpdate':
+                    # 深度增量事件：尽量匹配已订阅的 stream_name
+                    cand = [f"{symbol}@depth@100ms", f"{symbol}@depth"]
+                    subs = self._futures_subscriptions if is_futures else self._subscriptions
+                    stream_name = next((c for c in cand if c in subs or c in self._stream_symbol_map), cand[0])
+                elif event_type in {'24hrTicker'}:
+                    stream_name = f"{symbol}@ticker"
+                elif event_type == 'trade':
+                    stream_name = f"{symbol}@trade"
+                else:
+                    # 未知事件类型：回落到 ticker（至少能走通缓存/回调路径）
+                    stream_name = f"{symbol}@ticker"
+            elif 's' in data and 'b' in data and 'a' in data:
+                # 格式3: bookTicker 流可能没有 'e' 字段（仅包含 s/b/a/B/A/u 等）
+                symbol = str(data.get('s', '')).lower()
+                if not symbol:
+                    return
+                stream_name = f"{symbol}@bookTicker"
                 message_data = data
             else:
                 if self.logger:
@@ -425,6 +499,9 @@ class BinanceWebSocket(BinanceBase):
             # 根据流类型处理数据
             if '@ticker' in stream_name:
                 await self._handle_ticker_message(stream_name, message_data, is_futures)
+            elif '@bookticker' in stream_name.lower():
+                # Binance BBO (best bid/ask) 流
+                await self._handle_orderbook_message(stream_name, message_data, is_futures)
             elif '@depth' in stream_name:
                 await self._handle_orderbook_message(stream_name, message_data, is_futures)
             elif '@trade' in stream_name:
@@ -461,12 +538,12 @@ class BinanceWebSocket(BinanceBase):
             is_futures: 是否为期货/永续合约数据
         """
         try:
-            symbol = data.get('s', '').lower()
-            if not symbol:
+            raw_symbol = data.get('s', '')
+            if not raw_symbol:
                 return
-            
-            # 转换为标准格式
-            symbol = self.map_symbol_from_binance(symbol)
+            # 统一输出系统标准符号（避免上游 symbol_converter 对 BTC/USDT:USDT 之类无法回转导致被 watchlist 丢弃）
+            symbol = self.map_symbol_from_binance(raw_symbol)
+            symbol = symbol.replace("/", "-").replace(":", "-").upper()
             
             ticker = TickerData(
                 symbol=symbol,
@@ -500,38 +577,49 @@ class BinanceWebSocket(BinanceBase):
             if self.logger:
                 self.logger.error(f"❌ 处理行情数据失败: {str(e)}")
     
-    async def _handle_orderbook_message(self, stream_name: str, data: Dict[str, Any]):
+    async def _handle_orderbook_message(self, stream_name: str, data: Dict[str, Any], is_futures: bool = False):
         """处理订单簿数据"""
         try:
-            symbol = data.get('s', '').lower()
-            if not symbol:
+            raw_symbol = data.get('s', '')
+            if not raw_symbol:
                 return
-            
-            # 转换为标准格式
-            symbol = self.map_symbol_from_binance(symbol)
-            
-            # 解析买卖盘
-            bids = [
-                OrderBookLevel(
-                    price=self._safe_decimal(bid[0]),
-                    size=self._safe_decimal(bid[1])
-                )
-                for bid in data.get('b', [])
-            ]
-            
-            asks = [
-                OrderBookLevel(
-                    price=self._safe_decimal(ask[0]),
-                    size=self._safe_decimal(ask[1])
-                )
-                for ask in data.get('a', [])
-            ]
+            # 统一输出系统标准符号（同 _handle_ticker_message）
+            symbol = self.map_symbol_from_binance(raw_symbol)
+
+            # Binance bookTicker：b/a 为字符串，B/A 为数量（最适合直接产出 BBO）
+            if isinstance(data.get("b"), str) and isinstance(data.get("a"), str):
+                bid_p = self._safe_decimal(data.get("b"))
+                bid_sz = self._safe_decimal(data.get("B")) or Decimal("0")
+                ask_p = self._safe_decimal(data.get("a"))
+                ask_sz = self._safe_decimal(data.get("A")) or Decimal("0")
+                bids = [] if bid_p is None else [OrderBookLevel(price=bid_p, size=bid_sz)]
+                asks = [] if ask_p is None else [OrderBookLevel(price=ask_p, size=ask_sz)]
+            else:
+                # depthUpdate：b/a 为档位增量列表（非完整快照）。这里仍解析，但不保证第一档就是 best。
+                bids = [
+                    OrderBookLevel(
+                        price=self._safe_decimal(bid[0]),
+                        size=self._safe_decimal(bid[1])
+                    )
+                    for bid in data.get('b', [])
+                ]
+                asks = [
+                    OrderBookLevel(
+                        price=self._safe_decimal(ask[0]),
+                        size=self._safe_decimal(ask[1])
+                    )
+                    for ask in data.get('a', [])
+                ]
             
             orderbook = OrderBookData(
                 symbol=symbol,
                 bids=bids,
                 asks=asks,
-                timestamp=datetime.fromtimestamp(data.get('E', 0) / 1000),
+                timestamp=(
+                    datetime.fromtimestamp((data.get("E") or data.get("T") or 0) / 1000)
+                    if (data.get("E") or data.get("T"))
+                    else datetime.now()
+                ),
                 nonce=data.get('u'),
                 raw_data=data
             )
@@ -540,23 +628,22 @@ class BinanceWebSocket(BinanceBase):
             self._orderbook_cache[symbol] = orderbook
             
             # 调用回调函数
-            if stream_name in self._subscriptions:
-                callback = self._subscriptions[stream_name]
+            subscriptions = self._futures_subscriptions if is_futures else self._subscriptions
+            if stream_name in subscriptions:
+                callback = subscriptions[stream_name]
                 await self._safe_callback(callback, orderbook)
                 
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ 处理订单簿数据失败: {str(e)}")
     
-    async def _handle_trade_message(self, stream_name: str, data: Dict[str, Any]):
+    async def _handle_trade_message(self, stream_name: str, data: Dict[str, Any], is_futures: bool = False):
         """处理成交数据"""
         try:
-            symbol = data.get('s', '').lower()
-            if not symbol:
+            raw_symbol = data.get('s', '')
+            if not raw_symbol:
                 return
-            
-            # 转换为标准格式
-            symbol = self.map_symbol_from_binance(symbol)
+            symbol = self.map_symbol_from_binance(raw_symbol)
             
             trade = TradeData(
                 id=str(data.get('t', '')),
@@ -572,15 +659,16 @@ class BinanceWebSocket(BinanceBase):
             )
             
             # 调用回调函数
-            if stream_name in self._subscriptions:
-                callback = self._subscriptions[stream_name]
+            subscriptions = self._futures_subscriptions if is_futures else self._subscriptions
+            if stream_name in subscriptions:
+                callback = subscriptions[stream_name]
                 await self._safe_callback(callback, trade)
                 
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ 处理成交数据失败: {str(e)}")
     
-    async def _handle_kline_message(self, stream_name: str, data: Dict[str, Any]):
+    async def _handle_kline_message(self, stream_name: str, data: Dict[str, Any], is_futures: bool = False):
         """处理K线数据"""
         try:
             # K线数据处理逻辑
@@ -784,7 +872,57 @@ class BinanceWebSocket(BinanceBase):
             self.logger.info(f"⏳ 尝试重连期货数据流 ({self._futures_reconnect_attempts}/{self.max_reconnect_attempts})")
         
         await asyncio.sleep(self.reconnect_interval)
-        await self._connect_futures_stream()
+        success = await self._connect_futures_stream()
+
+        if not success:
+            return
+
+        # futures !miniTicker@arr：恢复全量 ticker（last/open/high/low/volume 等）
+        if self._futures_subscriptions and not self._futures_miniticker_subscribed:
+            self._futures_miniticker_subscribed = True
+        if self._futures_miniticker_subscribed:
+            try:
+                subscribe_msg = {
+                    "method": "SUBSCRIBE",
+                    "params": ["!miniTicker@arr"],
+                    "id": self._futures_stream_id_counter,
+                }
+                self._futures_stream_id_counter += 1
+                if self._futures_websocket:
+                    await self._futures_websocket.send(json.dumps(subscribe_msg))
+            except Exception:
+                pass
+
+        # 重连成功后重新订阅（否则连接恢复但不会再收到任何数据）
+        if self._futures_subscriptions or self._futures_bookticker_streams:
+            if self.logger:
+                self.logger.info(f"🔄 重新订阅 {len(self._futures_subscriptions)} 个期货流...")
+            streams = [s for s in self._futures_subscriptions.keys() if not s.endswith("@ticker")]
+            streams.extend(self._futures_bookticker_streams)
+            # 去重
+            uniq = []
+            seen = set()
+            for s in streams:
+                if s in seen:
+                    continue
+                seen.add(s)
+                uniq.append(s)
+
+            chunk_size = 200
+            for i in range(0, len(uniq), chunk_size):
+                chunk = uniq[i : i + chunk_size]
+                try:
+                    subscribe_msg = {
+                        "method": "SUBSCRIBE",
+                        "params": chunk,
+                        "id": self._futures_stream_id_counter,
+                    }
+                    self._futures_stream_id_counter += 1
+                    if self._futures_websocket:
+                        await self._futures_websocket.send(json.dumps(subscribe_msg))
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(f"❌ 期货重订阅失败: {e}")
     
     # ==================== 公共接口 ====================
     
@@ -796,8 +934,9 @@ class BinanceWebSocket(BinanceBase):
             callback: 回调函数
         """
         try:
-            # 判断是永续合约还是现货
-            is_futures = ':' in symbol
+            mapped = self.map_symbol_to_binance(symbol)
+            # 判断是永续合约还是现货（以映射后的 Binance/CCXT 符号为准）
+            is_futures = ':' in mapped
             
             if self.logger:
                 market_type = "永续合约" if is_futures else "现货"
@@ -810,28 +949,28 @@ class BinanceWebSocket(BinanceBase):
                 
                 # 移除保证金币种后缀，构建流名称
                 # HYPE/USDT:USDT -> HYPEUSDT -> hypeusdt@ticker
-                clean_symbol = symbol.split(':')[0]  # HYPE/USDT
+                clean_symbol = mapped.split(':')[0]  # HYPE/USDT
                 binance_symbol = clean_symbol.replace('/', '').lower()
                 stream_name = f"{binance_symbol}@ticker"
                 
                 # 注册到期货订阅
                 self._futures_subscriptions[stream_name] = callback
-                
-                # 发送订阅消息到期货WebSocket
-                subscribe_msg = {
-                    "method": "SUBSCRIBE",
-                    "params": [stream_name],
-                    "id": self._futures_stream_id_counter
-                }
-                self._futures_stream_id_counter += 1
-                
-                if self._futures_websocket:
-                    await self._futures_websocket.send(json.dumps(subscribe_msg))
-                    if self.logger:
-                        self.logger.info(f"📤 已发送期货订阅消息: {subscribe_msg}")
+                self._stream_symbol_map[stream_name] = symbol
+
+                # 统一用 !miniTicker@arr 提供期货行情（避免大量 per-symbol SUBSCRIBE 导致断线）
+                if not self._futures_miniticker_subscribed:
+                    subscribe_msg = {
+                        "method": "SUBSCRIBE",
+                        "params": ["!miniTicker@arr"],
+                        "id": self._futures_stream_id_counter
+                    }
+                    self._futures_stream_id_counter += 1
+                    if self._futures_websocket:
+                        await self._futures_websocket.send(json.dumps(subscribe_msg))
+                    self._futures_miniticker_subscribed = True
             else:
                 # 现货：使用直接流，每个交易对一个独立的 WebSocket 连接
-                binance_symbol = self.map_symbol_to_binance(symbol).replace('/', '').lower()
+                binance_symbol = mapped.replace('/', '').replace('-', '').lower()
                 stream_name = f"{binance_symbol}@ticker"
                 
                 # 🔥 使用直接流URL（不需要发送SUBSCRIBE消息）
@@ -851,6 +990,7 @@ class BinanceWebSocket(BinanceBase):
                 
                 # 注册回调
                 self._subscriptions[stream_name] = callback
+                self._stream_symbol_map[stream_name] = symbol
                 
                 # 启动消息处理任务
                 asyncio.create_task(self._handle_spot_stream_messages(stream_name, ws))
@@ -867,40 +1007,40 @@ class BinanceWebSocket(BinanceBase):
                 self.logger.error(f"❌ 订阅行情失败 {symbol}: {str(e)}")
             raise
     
-    async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBookData], None]):
+    async def subscribe_orderbook(
+        self,
+        symbol: str,
+        callback: Callable[[OrderBookData], None],
+        depth: Optional[int] = None,
+    ):
         """订阅订单簿数据"""
         try:
-            # 🔥 根据 symbol 形态选择现货/期货 WS
-            # - 期货/永续：BTC/USDT:USDT（包含 ':'）
-            # - 现货：BTC/USDT（不含 ':'）
-            is_futures = ':' in symbol
-
-            # 构建流名称（统一清洗）
             mapped = self.map_symbol_to_binance(symbol)
+            is_futures = ':' in mapped
+
+            # 构建流名称：bookTicker 直接提供 best bid/ask，适合 Monitor 的 BBO 需求
             clean = mapped.split(':')[0].replace('/', '').replace('-', '')
             binance_symbol = clean.lower()
-            stream_name = f"{binance_symbol}@depth@100ms"
-
             if is_futures:
                 if not self._futures_connected:
                     await self._connect_futures_stream()
+                # 方案 A：按 symbol 订阅 bookTicker（比 !bookTicker 更“密”，能稳定通过 /snapshot 的 2s 新鲜度过滤）
+                stream_name = f"{binance_symbol}@bookTicker"
                 self._futures_subscriptions[stream_name] = callback
-                subscribe_msg = {
-                    "method": "SUBSCRIBE",
-                    "params": [stream_name],
-                    "id": self._futures_stream_id_counter
-                }
-                self._futures_stream_id_counter += 1
-                if self._futures_websocket:
-                    await self._futures_websocket.send(json.dumps(subscribe_msg))
+                self._stream_symbol_map[stream_name] = symbol
+                self._schedule_futures_subscribe(stream_name)
             else:
+                # 现货目前仍使用单连接订阅模式（将来如果需要多档位，可以引入快照+增量合并）
+                stream_name = f"{binance_symbol}@bookTicker"
                 if not self._connected:
                     await self._connect_market_stream()
                 self._subscriptions[stream_name] = callback
+                # 保留原始 symbol 以便未来做更深档位的本地维护时能追踪订阅来源
+                self._stream_symbol_map[stream_name] = symbol
                 subscribe_msg = {
                     "method": "SUBSCRIBE",
                     "params": [stream_name],
-                    "id": self._stream_id_counter
+                    "id": self._stream_id_counter,
                 }
                 self._stream_id_counter += 1
                 if self._websocket:
@@ -917,16 +1057,28 @@ class BinanceWebSocket(BinanceBase):
     async def subscribe_trades(self, symbol: str, callback: Callable[[TradeData], None]):
         """订阅成交数据"""
         try:
+            mapped = self.map_symbol_to_binance(symbol)
+            is_futures = ':' in mapped
+
             # 确保连接
-            if not self._connected:
-                await self._connect_market_stream()
-            
-            # 构建流名称
-            binance_symbol = self.map_symbol_to_binance(symbol).lower()
+            if is_futures:
+                if not self._futures_connected:
+                    await self._connect_futures_stream()
+            else:
+                if not self._connected:
+                    await self._connect_market_stream()
+
+            # 构建流名称（统一清洗）
+            clean = mapped.split(':')[0].replace('/', '').replace('-', '')
+            binance_symbol = clean.lower()
             stream_name = f"{binance_symbol}@trade"
             
             # 注册回调
-            self._subscriptions[stream_name] = callback
+            if is_futures:
+                self._futures_subscriptions[stream_name] = callback
+            else:
+                self._subscriptions[stream_name] = callback
+            self._stream_symbol_map[stream_name] = symbol
             
             # 发送订阅消息
             subscribe_msg = {
@@ -936,8 +1088,12 @@ class BinanceWebSocket(BinanceBase):
             }
             self._stream_id_counter += 1
             
-            if self._websocket:
-                await self._websocket.send(json.dumps(subscribe_msg))
+            if is_futures:
+                if self._futures_websocket:
+                    await self._futures_websocket.send(json.dumps(subscribe_msg))
+            else:
+                if self._websocket:
+                    await self._websocket.send(json.dumps(subscribe_msg))
             
             if self.logger:
                 self.logger.info(f"💱 订阅成交数据: {symbol}")
@@ -972,14 +1128,24 @@ class BinanceWebSocket(BinanceBase):
         try:
             if symbol:
                 # 取消指定符号的订阅
-                binance_symbol = self.map_symbol_to_binance(symbol).lower()
+                mapped = self.map_symbol_to_binance(symbol)
+                binance_symbol = mapped.split(':')[0].replace('/', '').replace('-', '').lower()
                 streams_to_remove = [
-                    stream for stream in self._subscriptions.keys()
+                    stream for stream in list(self._subscriptions.keys())
+                    if stream.startswith(binance_symbol)
+                ]
+                futures_streams_to_remove = [
+                    stream for stream in list(self._futures_subscriptions.keys())
+                    if stream.startswith(binance_symbol)
+                ]
+                futures_bookticker_streams_to_remove = [
+                    stream for stream in list(self._futures_bookticker_streams)
                     if stream.startswith(binance_symbol)
                 ]
                 
                 for stream in streams_to_remove:
                     del self._subscriptions[stream]
+                    self._stream_symbol_map.pop(stream, None)
                     
                     # 发送取消订阅消息
                     unsubscribe_msg = {
@@ -991,13 +1157,33 @@ class BinanceWebSocket(BinanceBase):
                     
                     if self._websocket:
                         await self._websocket.send(json.dumps(unsubscribe_msg))
+
+                for stream in futures_streams_to_remove:
+                    del self._futures_subscriptions[stream]
+                    self._stream_symbol_map.pop(stream, None)
+                    unsubscribe_msg = {
+                        "method": "UNSUBSCRIBE",
+                        "params": [stream],
+                        "id": self._futures_stream_id_counter
+                    }
+                    self._futures_stream_id_counter += 1
+                    if self._futures_websocket:
+                        await self._futures_websocket.send(json.dumps(unsubscribe_msg))
+
+                for stream in futures_bookticker_streams_to_remove:
+                    self._futures_bookticker_streams.discard(stream)
+                    self._futures_pending_subscribe.discard(stream)
                 
                 if self.logger:
                     self.logger.info(f"🚫 取消订阅: {symbol}")
             else:
                 # 取消所有订阅
                 self._subscriptions.clear()
+                self._futures_subscriptions.clear()
                 self._user_subscriptions.clear()
+                self._stream_symbol_map.clear()
+                self._futures_bookticker_streams.clear()
+                self._futures_pending_subscribe.clear()
                 
                 if self.logger:
                     self.logger.info("🚫 取消所有订阅")

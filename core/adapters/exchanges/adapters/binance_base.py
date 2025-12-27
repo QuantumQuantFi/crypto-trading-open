@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any, Union
 from decimal import Decimal
 from datetime import datetime
 from enum import Enum
+import re
 
 from ..models import (
     TickerData, OrderBookData, TradeData, BalanceData, OrderData, 
@@ -189,12 +190,74 @@ class BinanceBase:
     
     def map_symbol_to_binance(self, symbol: str) -> str:
         """映射通用符号到Binance格式"""
-        return self._symbol_mapping.get(symbol, symbol)
+        if not symbol:
+            return symbol
+
+        raw = str(symbol).strip()
+        upper = raw.upper()
+
+        mapped = self._symbol_mapping.get(upper) or self._symbol_mapping.get(raw)
+        if mapped:
+            return mapped
+
+        # 兼容本项目的标准符号：BASE-QUOTE-PERP / BASE-QUOTE-SPOT
+        # Binance（CCXT）永续通常使用 BASE/QUOTE:QUOTE，如 BTC/USDT:USDT
+        m = re.match(r"^([A-Z0-9]+)-([A-Z0-9]+)-(PERP|SPOT)$", upper)
+        if m:
+            base, quote, kind = m.groups()
+            if kind == "PERP":
+                # 本项目内部大量使用 USDC 作为统一 quote，但 Binance 永续主要是 USDT；默认回落到 USDT
+                if quote == "USDC":
+                    quote = "USDT"
+                return f"{base}/{quote}:{quote}"
+            return f"{base}/{quote}"
+
+        # 兼容标准格式：BASE/QUOTE:PERP（内部常用） -> Binance/CCXT 永续：BASE/QUOTE:QUOTE
+        m = re.match(r"^([A-Z0-9]+)[/\\-]([A-Z0-9]+):(PERP|USDC|USDT)$", upper)
+        if m:
+            base, quote, kind = m.groups()
+            if kind == "PERP":
+                # 同上：默认回落到 USDT
+                if quote == "USDC":
+                    quote = "USDT"
+                return f"{base}/{quote}:{quote}"
+            if kind in {"USDC", "USDT"}:
+                # BTC/USDT:USDT 已是 Binance/CCXT 永续格式
+                return f"{base}/{quote}:{quote}"
+
+        return raw
     
     def map_symbol_from_binance(self, binance_symbol: str) -> str:
         """反向映射Binance符号到通用格式"""
-        reverse_mapping = {v: k for k, v in self._symbol_mapping.items()}
-        return reverse_mapping.get(binance_symbol, binance_symbol)
+        if not binance_symbol:
+            return binance_symbol
+
+        raw = str(binance_symbol).strip()
+        upper = raw.upper()
+
+        reverse_mapping = {str(v).upper(): k for k, v in self._symbol_mapping.items()}
+        if upper in reverse_mapping:
+            return reverse_mapping[upper]
+
+        # CCXT 永续：BTC/USDT:USDT -> BTC-USDC-PERP（系统内部统一用 USDC-PERP）
+        m = re.match(r"^([A-Z0-9]+)/(USDT|USDC):(USDT|USDC)$", upper)
+        if m:
+            base, _, _ = m.groups()
+            return f"{base}-USDC-PERP"
+
+        # 直接 WS：BTCUSDT -> BTC-USDC-PERP（同上）
+        m = re.match(r"^([A-Z0-9]+)(USDT|USDC)$", upper)
+        if m:
+            base, _ = m.groups()
+            return f"{base}-USDC-PERP"
+
+        # 现货：BTC/USDT -> BTC-USDT-SPOT
+        m = re.match(r"^([A-Z0-9]+)/(USDT|USDC|USD)$", upper)
+        if m:
+            base, quote = m.groups()
+            return f"{base}-{quote}-SPOT"
+
+        return raw
     
     def _safe_decimal(self, value: Any) -> Optional[Decimal]:
         """安全转换为Decimal类型"""
