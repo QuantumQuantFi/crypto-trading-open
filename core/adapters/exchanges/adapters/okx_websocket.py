@@ -659,7 +659,12 @@ class OKXWebSocket(OKXBase):
                 self.logger.error(f"❌ 订阅行情失败 {symbol}: {str(e)}")
             raise
     
-    async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBookData], None]):
+    async def subscribe_orderbook(
+        self,
+        symbol: str,
+        callback: Callable[[OrderBookData], None],
+        depth: Optional[int] = None,
+    ):
         """订阅订单簿数据"""
         try:
             # 确保连接
@@ -668,16 +673,28 @@ class OKXWebSocket(OKXBase):
             
             # 构建OKX符号
             okx_symbol = self.map_symbol_to_okx(symbol)
-            
+
+            channel = "books"
+            if depth is not None:
+                if depth == 5:
+                    channel = "books5"
+                elif depth != 10 and self.logger:
+                    self.logger.debug(
+                        "OKX orderbook depth=%s 未明确支持，继续使用 channel=%s (%s)",
+                        depth,
+                        channel,
+                        symbol,
+                    )
+
             # 注册回调
-            channel_key = f"books:{okx_symbol}"
+            channel_key = f"{channel}:{okx_symbol}"
             self._public_subscriptions[channel_key] = callback
-            
+
             # 发送订阅消息
             subscribe_msg = {
                 "op": "subscribe",
                 "args": [{
-                    "channel": "books",
+                    "channel": channel,
                     "instId": okx_symbol
                 }]
             }
