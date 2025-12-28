@@ -8,7 +8,7 @@
 """
 
 import asyncio
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -124,6 +124,25 @@ class HealthMonitor:
             symbol: 交易对
         """
         self.last_data_time[exchange][symbol] = datetime.now()
+
+    def prune_inactive(self, active_pairs: List[tuple]) -> None:
+        active_by_exchange: Dict[str, set] = defaultdict(set)
+        for exchange, symbol in active_pairs:
+            active_by_exchange[exchange].add(symbol)
+
+        for exchange in list(self.last_data_time.keys()):
+            active_symbols = active_by_exchange.get(exchange)
+            if not active_symbols:
+                self.last_data_time.pop(exchange, None)
+                self.connection_status.pop(exchange, None)
+                continue
+            exchange_times = self.last_data_time[exchange]
+            for symbol in list(exchange_times.keys()):
+                if symbol not in active_symbols:
+                    exchange_times.pop(symbol, None)
+            if not exchange_times:
+                self.last_data_time.pop(exchange, None)
+                self.connection_status.pop(exchange, None)
     
     def get_exchange_status(self, exchange: str) -> str:
         """
@@ -173,4 +192,3 @@ class HealthMonitor:
                 stale.append(symbol)
         
         return stale
-

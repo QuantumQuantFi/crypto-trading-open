@@ -494,12 +494,17 @@ class MonitorApiRuntime:
                 await self._refresh_symbols_for_analysis()
 
     async def _refresh_symbols_for_analysis(self) -> None:
+        active_pairs = self.watchlist.active_pairs()
         active = set(self.watchlist.active_symbols())
         ordered: List[str] = [s for s in self._symbol_order if s in active]
         for s in active:
             if s not in ordered:
                 ordered.append(s)
         await self.orchestrator.set_symbols(ordered)
+        try:
+            self.orchestrator.health_monitor.prune_inactive(active_pairs)
+        except Exception:
+            pass
 
     async def add_watch(
         self,

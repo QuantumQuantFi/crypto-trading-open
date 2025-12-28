@@ -120,3 +120,4 @@
 - 订阅清理补齐：Binance / OKX / EdgeX / GRVT / Hyperliquid（ccxt+native）/ Backpack / Variational 等实现 `unsubscribe_*`，并在无订阅时尝试关闭 WS 连接。
 - 轮询降级停止：Hyperliquid 轮询模式按数据类型可停止（避免取消某类订阅导致其它轮询被误停）。
 - UI 展示补充：页面展示“当前关注的交易所 / 当前关注的币种清单”，便于确认 watchlist 覆盖范围。
+- 健康状态清理：watchlist 变更时裁剪 health 监控的历史 symbol，避免 TTL 清理后仍被判定为 unhealthy。
