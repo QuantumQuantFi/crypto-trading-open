@@ -270,6 +270,40 @@ class GRVTWebSocket(GRVTBase):
             for k in to_remove:
                 self._trade_subs.discard(k)
 
+    async def _close_market_if_idle(self) -> None:
+        if self._market_subs:
+            return
+        if self._market_task:
+            self._market_task.cancel()
+            self._market_task = None
+        if self._market_ws:
+            await self._market_ws.close()
+            self._market_ws = None
+
+    async def _close_trade_if_idle(self) -> None:
+        if self._trade_subs or self._user_cbs or self._order_cbs or self._order_fill_cbs or self._position_cbs:
+            return
+        if self._trade_task:
+            self._trade_task.cancel()
+            self._trade_task = None
+        if self._trade_ws:
+            await self._trade_ws.close()
+            self._trade_ws = None
+
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅 ticker"""
+        sym = self.normalize_symbol(symbol)
+        self._ticker_cbs.pop(sym, None)
+        await self.unsubscribe_all(symbol=sym)
+        await self._close_market_if_idle()
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅 orderbook"""
+        sym = self.normalize_symbol(symbol)
+        self._book_cbs.pop(sym, None)
+        await self.unsubscribe_all(symbol=sym)
+        await self._close_market_if_idle()
+
     async def _market_loop(self) -> None:
         """公共行情 WS 接收循环：逐条解析并分发到各类行情回调。"""
         assert self._market_ws is not None
@@ -456,5 +490,4 @@ class GRVTWebSocket(GRVTBase):
             )
         except Exception:
             return None
-
 

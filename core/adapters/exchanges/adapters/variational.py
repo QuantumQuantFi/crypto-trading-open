@@ -277,6 +277,10 @@ class VariationalAdapter(ExchangeAdapter):
 
         self._ticker_tasks[normalized] = asyncio.create_task(_loop())
 
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅ticker轮询"""
+        await self.unsubscribe(symbol)
+
     async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBookData], None]) -> None:
         """
         Variational 不提供深度 orderbook。
@@ -348,5 +352,4 @@ class VariationalAdapter(ExchangeAdapter):
                 await result
         except Exception as e:
             self.logger.error(f"Variational callback error: {e}")
-
 

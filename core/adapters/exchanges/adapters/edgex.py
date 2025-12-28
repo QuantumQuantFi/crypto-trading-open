@@ -1152,6 +1152,28 @@ class EdgeXAdapter(ExchangeAdapter):
         """取消所有订阅"""
         await self.websocket.unsubscribe_all()
 
+    async def _close_ws_if_idle(self) -> None:
+        if getattr(self.websocket, "ws_subscriptions", []):
+            return
+        try:
+            await self.websocket.unsubscribe_all()
+        except Exception:
+            pass
+        try:
+            await self.websocket.disconnect()
+        except Exception:
+            pass
+
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅行情数据"""
+        await self.websocket.unsubscribe(symbol)
+        await self._close_ws_if_idle()
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅订单簿数据"""
+        await self.websocket.unsubscribe(symbol)
+        await self._close_ws_if_idle()
+
     # === 向后兼容的接口 ===
 
     async def subscribe_order_book(self, symbol: str, callback, depth: int = 20):

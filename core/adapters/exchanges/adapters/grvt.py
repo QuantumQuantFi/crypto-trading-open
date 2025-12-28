@@ -968,3 +968,12 @@ class GRVTAdapter(ExchangeAdapter):
             return
         await self._websocket.unsubscribe_all(symbol=symbol)
 
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        if not self._websocket:
+            return
+        await self._websocket.unsubscribe_ticker(symbol)
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        if not self._websocket:
+            return
+        await self._websocket.unsubscribe_orderbook(symbol)

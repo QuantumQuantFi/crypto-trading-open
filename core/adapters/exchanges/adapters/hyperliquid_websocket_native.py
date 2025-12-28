@@ -270,6 +270,48 @@ class HyperliquidNativeWebSocket:
         if self.logger:
             self.logger.info(f"订阅trades: {symbol}")
 
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅ticker数据"""
+        self._subscriptions = [
+            (t, s, cb) for (t, s, cb) in self._subscriptions if not (t == "ticker" and s == symbol)
+        ]
+        if not self._has_symbol_subscriptions(symbol):
+            self._subscribed_symbols.discard(symbol)
+
+        if self._ws_connected and not self._has_ticker_subscriptions():
+            await self._unsubscribe_allmids()
+
+        if self.logger:
+            self.logger.info(f"取消订阅ticker: {symbol}")
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅orderbook数据"""
+        self._subscriptions = [
+            (t, s, cb) for (t, s, cb) in self._subscriptions if not (t == "orderbook" and s == symbol)
+        ]
+        if not self._has_symbol_subscriptions(symbol):
+            self._subscribed_symbols.discard(symbol)
+
+        if self._ws_connected:
+            await self._unsubscribe_l2book(symbol)
+
+        if self.logger:
+            self.logger.info(f"取消订阅orderbook: {symbol}")
+
+    async def unsubscribe_trades(self, symbol: str) -> None:
+        """取消订阅trades数据"""
+        self._subscriptions = [
+            (t, s, cb) for (t, s, cb) in self._subscriptions if not (t == "trades" and s == symbol)
+        ]
+        if not self._has_symbol_subscriptions(symbol):
+            self._subscribed_symbols.discard(symbol)
+
+        if self._ws_connected:
+            await self._unsubscribe_trades(symbol)
+
+        if self.logger:
+            self.logger.info(f"取消订阅trades: {symbol}")
+
     async def batch_subscribe_tickers(self, symbols: List[str], callback: Callable[[str, TickerData], None]) -> None:
         """批量订阅ticker数据 - 使用allMids"""
         if not symbols:
@@ -476,6 +518,76 @@ class HyperliquidNativeWebSocket:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ 订阅trades失败 {symbol}: {e}")
+
+    def _has_symbol_subscriptions(self, symbol: str) -> bool:
+        return any(sub_symbol == symbol for _, sub_symbol, _ in self._subscriptions)
+
+    def _has_ticker_subscriptions(self) -> bool:
+        return any(sub_type == "ticker" for sub_type, _, _ in self._subscriptions)
+
+    async def _unsubscribe_allmids(self) -> None:
+        """取消订阅allMids数据流"""
+        try:
+            if not self._ws_connected:
+                return
+
+            unsubscribe_msg = {
+                "method": "unsubscribe",
+                "subscription": {
+                    "type": "allMids"
+                }
+            }
+            await self._ws_connection.send(json.dumps(unsubscribe_msg))
+
+            if self.logger:
+                self.logger.info("🎯 已取消订阅Hyperliquid allMids数据流")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"❌ 取消订阅allMids失败: {e}")
+
+    async def _unsubscribe_l2book(self, symbol: str) -> None:
+        """取消订阅l2Book数据流"""
+        try:
+            if not self._ws_connected:
+                return
+
+            hyperliquid_symbol = self._convert_to_hyperliquid_symbol(symbol)
+            unsubscribe_msg = {
+                "method": "unsubscribe",
+                "subscription": {
+                    "type": "l2Book",
+                    "coin": hyperliquid_symbol
+                }
+            }
+            await self._ws_connection.send(json.dumps(unsubscribe_msg))
+
+            if self.logger:
+                self.logger.info(f"🎯 已取消订阅Hyperliquid l2Book: {symbol} -> {hyperliquid_symbol}")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"❌ 取消订阅l2Book失败 {symbol}: {e}")
+
+    async def _unsubscribe_trades(self, symbol: str) -> None:
+        """取消订阅trades数据流"""
+        try:
+            if not self._ws_connected:
+                return
+
+            hyperliquid_symbol = self._convert_to_hyperliquid_symbol(symbol)
+            unsubscribe_msg = {
+                "method": "unsubscribe",
+                "subscription": {
+                    "type": "trades",
+                    "coin": hyperliquid_symbol
+                }
+            }
+            await self._ws_connection.send(json.dumps(unsubscribe_msg))
+
+            if self.logger:
+                self.logger.info(f"🎯 已取消订阅Hyperliquid trades: {symbol} -> {hyperliquid_symbol}")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"❌ 取消订阅trades失败 {symbol}: {e}")
 
     async def _message_handler(self) -> None:
         """WebSocket消息处理器"""

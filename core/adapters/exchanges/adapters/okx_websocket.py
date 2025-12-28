@@ -825,6 +825,45 @@ class OKXWebSocket(OKXBase):
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ 取消订阅失败: {str(e)}")
+
+    async def _unsubscribe_public_channel(self, channel: str, inst_id: str) -> None:
+        channel_key = f"{channel}:{inst_id}"
+        if channel_key in self._public_subscriptions:
+            del self._public_subscriptions[channel_key]
+            unsubscribe_msg = {
+                "op": "unsubscribe",
+                "args": [{
+                    "channel": channel,
+                    "instId": inst_id,
+                }],
+            }
+            if self._public_websocket:
+                await self._public_websocket.send(json.dumps(unsubscribe_msg))
+
+    async def _close_public_if_idle(self) -> None:
+        if self._public_subscriptions:
+            return
+        ws = self._public_websocket
+        if ws:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        self._public_websocket = None
+        self._public_connected = False
+
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅行情数据"""
+        okx_symbol = self.map_symbol_to_okx(symbol)
+        await self._unsubscribe_public_channel("tickers", okx_symbol)
+        await self._close_public_if_idle()
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅订单簿数据"""
+        okx_symbol = self.map_symbol_to_okx(symbol)
+        await self._unsubscribe_public_channel("books", okx_symbol)
+        await self._unsubscribe_public_channel("books5", okx_symbol)
+        await self._close_public_if_idle()
     
     def get_cached_ticker(self, symbol: str) -> Optional[TickerData]:
         """获取缓存的行情数据"""

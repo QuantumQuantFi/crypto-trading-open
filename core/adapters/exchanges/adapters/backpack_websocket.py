@@ -1931,6 +1931,83 @@ class BackpackWebSocket(BackpackBase):
             if self.logger:
                 self.logger.warning(f"订阅trades失败: {e}")
 
+    def _remove_symbol_if_unused(self, symbol: str) -> None:
+        if not hasattr(self, "_subscribed_symbols"):
+            return
+        for _, sub_symbol, _ in self._ws_subscriptions:
+            if sub_symbol == symbol:
+                return
+        self._subscribed_symbols.discard(symbol)
+
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅行情数据流"""
+        try:
+            self._ws_subscriptions = [
+                (sub_type, sym, cb) for sub_type, sym, cb in self._ws_subscriptions
+                if not (sub_type == 'ticker' and sym == symbol)
+            ]
+            self._remove_symbol_if_unused(symbol)
+
+            unsubscribe_msg = {
+                "method": "UNSUBSCRIBE",
+                "params": [
+                    f"ticker.{symbol}",
+                    f"markPrice.{symbol}",
+                ],
+                "id": len(self._ws_subscriptions) + 1
+            }
+            await self._safe_send_message(json.dumps(unsubscribe_msg))
+
+            if self.logger:
+                self.logger.debug(f"已取消订阅 {symbol} 的 ticker + markPrice")
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"取消订阅ticker失败: {e}")
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅订单簿数据流"""
+        try:
+            self._ws_subscriptions = [
+                (sub_type, sym, cb) for sub_type, sym, cb in self._ws_subscriptions
+                if not (sub_type == 'orderbook' and sym == symbol)
+            ]
+            self._remove_symbol_if_unused(symbol)
+
+            unsubscribe_msg = {
+                "method": "UNSUBSCRIBE",
+                "params": [f"depth.{symbol}"],
+                "id": len(self._ws_subscriptions) + 1
+            }
+            await self._safe_send_message(json.dumps(unsubscribe_msg))
+
+            if self.logger:
+                self.logger.debug(f"已取消订阅 {symbol} 的orderbook")
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"取消订阅orderbook失败: {e}")
+
+    async def unsubscribe_trades(self, symbol: str) -> None:
+        """取消订阅成交数据流"""
+        try:
+            self._ws_subscriptions = [
+                (sub_type, sym, cb) for sub_type, sym, cb in self._ws_subscriptions
+                if not (sub_type == 'trades' and sym == symbol)
+            ]
+            self._remove_symbol_if_unused(symbol)
+
+            unsubscribe_msg = {
+                "method": "UNSUBSCRIBE",
+                "params": [f"trade.{symbol}"],
+                "id": len(self._ws_subscriptions) + 1
+            }
+            await self._safe_send_message(json.dumps(unsubscribe_msg))
+
+            if self.logger:
+                self.logger.debug(f"已取消订阅 {symbol} 的trades")
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"取消订阅trades失败: {e}")
+
     def _sign_message_for_subscription(self, message: str) -> str:
         """
         为WebSocket订阅生成ED25519签名

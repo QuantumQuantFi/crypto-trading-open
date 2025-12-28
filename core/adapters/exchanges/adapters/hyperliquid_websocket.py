@@ -1444,6 +1444,37 @@ class HyperliquidWebSocket:
             self._position_callbacks.append(callback)
         self.logger.info("ℹ️  Hyperliquid WebSocket 不提供持仓推送，将依赖REST刷新缓存")
 
+    def _has_active_market_subscriptions(self) -> bool:
+        return any(sub_type in {"ticker", "orderbook", "trades"} for sub_type, _, _ in self._subscriptions)
+
+    async def _close_ccxt_if_idle(self) -> None:
+        if self._has_active_market_subscriptions():
+            return
+        try:
+            await self._cleanup_ccxt_tasks()
+        except Exception:
+            pass
+        try:
+            await self._close_ccxt_connection()
+        except Exception:
+            pass
+        self._ccxt_connected = False
+        self._latest_orderbooks.clear()
+
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅 ticker"""
+        self._subscriptions = [
+            (t, s, cb) for (t, s, cb) in self._subscriptions if not (t == "ticker" and s == symbol)
+        ]
+        await self._close_ccxt_if_idle()
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅 orderbook"""
+        self._subscriptions = [
+            (t, s, cb) for (t, s, cb) in self._subscriptions if not (t == "orderbook" and s == symbol)
+        ]
+        await self._close_ccxt_if_idle()
+
     async def unsubscribe_trades(self, symbols: List[str]):
         """取消订阅交易数据"""
         self.logger.info(f"[CCXT] 取消订阅交易数据: {symbols}")

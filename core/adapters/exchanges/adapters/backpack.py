@@ -614,6 +614,42 @@ class BackpackAdapter(ExchangeAdapter):
         if hasattr(self._websocket, "unsubscribe_user_data"):
             await self._websocket.unsubscribe_user_data()
 
+    async def _close_ws_if_idle(self) -> None:
+        if getattr(self._websocket, "_ws_subscriptions", []):
+            return
+        try:
+            await self._websocket.unsubscribe_all()
+        except Exception:
+            pass
+        try:
+            await self._websocket.disconnect()
+        except Exception:
+            pass
+
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅ticker数据流"""
+        if hasattr(self._websocket, "unsubscribe_ticker"):
+            await self._websocket.unsubscribe_ticker(symbol)
+        elif hasattr(self._websocket, "unsubscribe"):
+            await self._websocket.unsubscribe(symbol)
+        await self._close_ws_if_idle()
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅订单簿数据流"""
+        if hasattr(self._websocket, "unsubscribe_orderbook"):
+            await self._websocket.unsubscribe_orderbook(symbol)
+        elif hasattr(self._websocket, "unsubscribe"):
+            await self._websocket.unsubscribe(symbol)
+        await self._close_ws_if_idle()
+
+    async def unsubscribe_trades(self, symbol: str) -> None:
+        """取消订阅成交数据流"""
+        if hasattr(self._websocket, "unsubscribe_trades"):
+            await self._websocket.unsubscribe_trades(symbol)
+        elif hasattr(self._websocket, "unsubscribe"):
+            await self._websocket.unsubscribe(symbol)
+        await self._close_ws_if_idle()
+
     async def subscribe_position_updates(self, symbol: str, callback: Callable) -> None:
         """
         订阅持仓更新流（实时同步持仓）

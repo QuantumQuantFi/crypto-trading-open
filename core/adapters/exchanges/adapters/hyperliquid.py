@@ -107,6 +107,12 @@ class HyperliquidAdapter(ExchangeAdapter):
             'trades': [],
             'user_data': []
         }
+        self._stop_polling: Dict[str, set] = {
+            "ticker": set(),
+            "orderbook": set(),
+            "trades": set(),
+            "user_data": set(),
+        }
 
         # 🚀 初始化订阅管理器 - 支持硬编码和动态两种模式
         try:
@@ -641,6 +647,7 @@ class HyperliquidAdapter(ExchangeAdapter):
     async def subscribe_ticker(self, symbol: str, callback: Callable[[TickerData], None]) -> None:
         """订阅行情数据流"""
         try:
+            self._stop_polling["ticker"].discard(symbol)
             # 包装回调函数
             wrapped_callback = self._wrap_ticker_callback(callback)
             self._ws_callbacks['ticker'].append(
@@ -661,6 +668,7 @@ class HyperliquidAdapter(ExchangeAdapter):
     async def subscribe_orderbook(self, symbol: str, callback: Callable[[OrderBookData], None]) -> None:
         """订阅订单簿数据流"""
         try:
+            self._stop_polling["orderbook"].discard(symbol)
             # 包装回调函数
             wrapped_callback = self._wrap_orderbook_callback(callback)
             callback_entry = (symbol, callback, wrapped_callback)
@@ -682,6 +690,7 @@ class HyperliquidAdapter(ExchangeAdapter):
     async def subscribe_trades(self, symbol: str, callback: Callable[[TradeData], None]) -> None:
         """订阅成交数据流"""
         try:
+            self._stop_polling["trades"].discard(symbol)
             # 包装回调函数
             wrapped_callback = self._wrap_trades_callback(callback)
             self._ws_callbacks['trades'].append(
@@ -749,6 +758,28 @@ class HyperliquidAdapter(ExchangeAdapter):
                 self._ws_callbacks[callback_type].clear()
             if self.logger:
                 self.logger.info("已取消所有订阅")
+
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅行情数据"""
+        self._ws_callbacks['ticker'] = [
+            (s, cb, wcb) for s, cb, wcb in self._ws_callbacks['ticker'] if s != symbol
+        ]
+        try:
+            await self._websocket.unsubscribe_ticker(symbol)
+        except Exception:
+            pass
+        self._stop_polling["ticker"].add(symbol)
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅订单簿数据"""
+        self._ws_callbacks['orderbook'] = [
+            (s, cb, wcb) for s, cb, wcb in self._ws_callbacks['orderbook'] if s != symbol
+        ]
+        try:
+            await self._websocket.unsubscribe_orderbook(symbol)
+        except Exception:
+            pass
+        self._stop_polling["orderbook"].add(symbol)
 
     # === 批量订阅接口 ===
 
@@ -1215,6 +1246,8 @@ class HyperliquidAdapter(ExchangeAdapter):
         """轮询ticker数据"""
         try:
             while True:
+                if symbol in self._stop_polling["ticker"]:
+                    break
                 ticker = await self.get_ticker(symbol)
 
                 if asyncio.iscoroutinefunction(callback):
@@ -1231,6 +1264,8 @@ class HyperliquidAdapter(ExchangeAdapter):
         """轮询orderbook数据"""
         try:
             while True:
+                if symbol in self._stop_polling["orderbook"]:
+                    break
                 orderbook = await self.get_orderbook(symbol)
 
                 if asyncio.iscoroutinefunction(callback):
@@ -1248,6 +1283,8 @@ class HyperliquidAdapter(ExchangeAdapter):
         try:
             last_trade_id = None
             while True:
+                if symbol in self._stop_polling["trades"]:
+                    break
                 trades = await self.get_trades(symbol, limit=10)
 
                 # 只推送新的成交
@@ -1271,6 +1308,8 @@ class HyperliquidAdapter(ExchangeAdapter):
             last_orders = {}
 
             while True:
+                if self._stop_polling["user_data"]:
+                    break
                 # 检查余额变化
                 try:
                     current_balances = await self.get_balances()
