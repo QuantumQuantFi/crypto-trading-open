@@ -19,6 +19,8 @@ aiohttp==3.9.1                # 异步 HTTP 客户端（稳定版本）
 aiofiles>=23.0.0              # 异步文件IO（历史记录功能需要）
 websockets==12.0              # WebSocket 客户端/服务器
 websocket-client==1.6.4       # 同步 WebSocket 客户端（某些库需要）
+PySocks==1.7.1                # SOCKS5 代理支持（requests / ccxt）
+python-socks==2.5.3           # SOCKS5 代理支持（websockets）
 
 # ────────────────────────────────────────────────────────────────────────────
 # 🔗 交易所适配器 (Exchange Adapters)

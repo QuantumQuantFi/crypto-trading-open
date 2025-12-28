@@ -5,6 +5,7 @@ Binance交易所基础模块 - 重构版
 重构：遵循MESA架构，简化符号映射，支持统一符号转换服务
 """
 
+import os
 import time
 import decimal
 from typing import Dict, List, Optional, Any, Union
@@ -114,10 +115,37 @@ class BinanceBase:
         # 支持的交易对和映射
         self._supported_symbols = []
         self._market_info = {}
-        
+
+        self.proxy_url = self._resolve_proxy_url()
+        self.ws_proxy_url = self._resolve_ws_proxy_url()
+
         # CCXT兼容配置
         self.ccxt_config = self._setup_ccxt_config()
-        
+
+    def _pick_proxy_value(self, keys: List[str], env_key: str) -> Optional[str]:
+        extra_params = getattr(self.config, "extra_params", None) or {}
+        for key in keys:
+            value = extra_params.get(key)
+            if value:
+                value = str(value).strip()
+                if value:
+                    return value
+        env_value = os.getenv(env_key, "").strip()
+        return env_value or None
+
+    def _resolve_proxy_url(self) -> Optional[str]:
+        return self._pick_proxy_value(
+            keys=["proxy_url", "binance_proxy_url"],
+            env_key="BINANCE_PROXY_URL",
+        )
+
+    def _resolve_ws_proxy_url(self) -> Optional[str]:
+        ws_proxy = self._pick_proxy_value(
+            keys=["ws_proxy_url", "binance_ws_proxy_url"],
+            env_key="BINANCE_WS_PROXY_URL",
+        )
+        return ws_proxy or self.proxy_url
+
     def _setup_urls(self):
         """设置API URL"""
         if self.config:
@@ -176,6 +204,12 @@ class BinanceBase:
             if self.testnet:
                 config['sandbox'] = True
                 config['urls'] = {'api': self.base_url}
+
+            if self.proxy_url:
+                config['proxies'] = {
+                    'http': self.proxy_url,
+                    'https': self.proxy_url,
+                }
         
         return config
     

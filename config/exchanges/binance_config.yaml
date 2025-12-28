@@ -15,6 +15,11 @@ binance:
   authentication:
     api_key: ''                              # API密钥（留空即可）
     api_secret: ''                           # API密钥（留空即可）
+
+  # SOCKS5代理（可选，REST + WS）
+  extra_params:
+    proxy_url: socks5h://47.79.224.99:1080
+    ws_proxy_url: socks5h://47.79.224.99:1080
   
   # 交易所信息
   exchange_id: binance
@@ -83,4 +88,3 @@ binance:
   fees:
     maker: 0.001                             # Maker费率 0.1%
     taker: 0.001                             # Taker费率 0.1%
-

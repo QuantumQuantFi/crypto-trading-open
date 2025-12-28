@@ -14,6 +14,10 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable, Set
 from decimal import Decimal
 from enum import Enum
+from urllib.parse import urlparse
+
+from python_socks import ProxyType
+from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from .binance_base import BinanceBase
 from ..models import (
@@ -203,6 +207,59 @@ class BinanceWebSocket(BinanceBase):
             return not closed
         close_code = getattr(ws, "close_code", None)
         return close_code is None
+
+    def _build_ws_connect_kwargs(self, *, ssl_context: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {}
+        if ssl_context is not None:
+            kwargs["ssl"] = ssl_context
+        if self.ws_proxy_url:
+            kwargs["proxy"] = self.ws_proxy_url
+        return kwargs
+
+    def _is_socks_proxy(self) -> bool:
+        return bool(self.ws_proxy_url and str(self.ws_proxy_url).lower().startswith("socks"))
+
+    def _build_socks_proxy(self, proxy_url: str) -> SocksProxy:
+        parsed = urlparse(proxy_url)
+        scheme = (parsed.scheme or "").lower()
+        if not scheme.startswith("socks"):
+            raise ValueError(f"unsupported proxy scheme: {scheme}")
+        proxy_type = ProxyType.SOCKS5 if scheme.startswith("socks5") else ProxyType.SOCKS4
+        rdns = scheme.endswith("h") or scheme.endswith("a")
+        host = parsed.hostname or ""
+        if not host:
+            raise ValueError("proxy host is required")
+        port = parsed.port or 1080
+        return SocksProxy(
+            proxy_type=proxy_type,
+            host=host,
+            port=port,
+            username=parsed.username,
+            password=parsed.password,
+            rdns=rdns,
+        )
+
+    async def _connect_ws(self, uri: str, *, ssl_context: Optional[ssl.SSLContext] = None):
+        if self._is_socks_proxy():
+            proxy = self._build_socks_proxy(str(self.ws_proxy_url))
+            parsed = urlparse(uri)
+            host = parsed.hostname
+            if not host:
+                raise ValueError(f"invalid ws uri: {uri}")
+            port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+            sock = await proxy.connect(host, port)
+            sock.setblocking(False)
+            try:
+                return await websockets.connect(uri, ssl=ssl_context, sock=sock)
+            except Exception:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                raise
+
+        connect_kwargs = self._build_ws_connect_kwargs(ssl_context=ssl_context)
+        return await websockets.connect(uri, **connect_kwargs)
     
     async def _connect_market_stream(self) -> bool:
         """连接现货市场数据流"""
@@ -220,8 +277,8 @@ class BinanceWebSocket(BinanceBase):
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-            
-            self._websocket = await websockets.connect(spot_ws_url, ssl=ssl_context)
+
+            self._websocket = await self._connect_ws(spot_ws_url, ssl_context=ssl_context)
             self._connected = True
             self._reconnect_attempts = 0
             
@@ -254,8 +311,8 @@ class BinanceWebSocket(BinanceBase):
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-            
-            self._futures_websocket = await websockets.connect(futures_ws_url, ssl=ssl_context)
+
+            self._futures_websocket = await self._connect_ws(futures_ws_url, ssl_context=ssl_context)
             self._futures_connected = True
             self._futures_reconnect_attempts = 0
             
@@ -289,8 +346,8 @@ class BinanceWebSocket(BinanceBase):
             
             if self.logger:
                 self.logger.info(f"📡 连接Binance用户数据流: {ws_url}")
-            
-            self._user_websocket = await websockets.connect(ws_url)
+
+            self._user_websocket = await self._connect_ws(ws_url)
             self._user_connected = True
             
             # 启动消息处理任务
@@ -985,7 +1042,7 @@ class BinanceWebSocket(BinanceBase):
                 ssl_context.verify_mode = ssl.CERT_NONE
                 
                 # 为这个交易对创建独立的 WebSocket 连接
-                ws = await websockets.connect(direct_stream_url, ssl=ssl_context)
+                ws = await self._connect_ws(direct_stream_url, ssl_context=ssl_context)
                 self._spot_websockets[stream_name] = ws
                 
                 # 注册回调
@@ -1191,6 +1248,109 @@ class BinanceWebSocket(BinanceBase):
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ 取消订阅失败: {str(e)}")
+
+    def _has_futures_ticker_subscriptions(self) -> bool:
+        return any(name.endswith("@ticker") for name in self._futures_subscriptions.keys())
+
+    async def _maybe_unsubscribe_futures_miniticker(self) -> None:
+        if self._futures_miniticker_subscribed and not self._has_futures_ticker_subscriptions():
+            unsubscribe_msg = {
+                "method": "UNSUBSCRIBE",
+                "params": ["!miniTicker@arr"],
+                "id": self._futures_stream_id_counter,
+            }
+            self._futures_stream_id_counter += 1
+            if self._futures_websocket:
+                await self._futures_websocket.send(json.dumps(unsubscribe_msg))
+            self._futures_miniticker_subscribed = False
+
+    async def _close_spot_if_idle(self) -> None:
+        if self._subscriptions or self._spot_websockets:
+            return
+        ws = self._websocket
+        if ws:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        self._websocket = None
+        self._connected = False
+
+    async def _close_futures_if_idle(self) -> None:
+        if self._futures_subscriptions or self._futures_bookticker_streams:
+            return
+        ws = self._futures_websocket
+        if ws:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        self._futures_websocket = None
+        self._futures_connected = False
+
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅 ticker（尽量收回对应 WS 资源）"""
+        mapped = self.map_symbol_to_binance(symbol)
+        is_futures = ':' in mapped
+        clean = mapped.split(':')[0].replace('/', '').replace('-', '')
+        binance_symbol = clean.lower()
+        stream_name = f"{binance_symbol}@ticker"
+
+        if is_futures:
+            if stream_name in self._futures_subscriptions:
+                del self._futures_subscriptions[stream_name]
+            self._stream_symbol_map.pop(stream_name, None)
+            await self._maybe_unsubscribe_futures_miniticker()
+            await self._close_futures_if_idle()
+            return
+
+        ws = self._spot_websockets.pop(stream_name, None)
+        if ws:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        self._subscriptions.pop(stream_name, None)
+        self._stream_symbol_map.pop(stream_name, None)
+        await self._close_spot_if_idle()
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅 orderbook（bookTicker）"""
+        mapped = self.map_symbol_to_binance(symbol)
+        is_futures = ':' in mapped
+        clean = mapped.split(':')[0].replace('/', '').replace('-', '')
+        binance_symbol = clean.lower()
+        stream_name = f"{binance_symbol}@bookTicker"
+
+        if is_futures:
+            if stream_name in self._futures_subscriptions:
+                del self._futures_subscriptions[stream_name]
+            self._stream_symbol_map.pop(stream_name, None)
+            self._futures_bookticker_streams.discard(stream_name)
+            self._futures_pending_subscribe.discard(stream_name)
+            unsubscribe_msg = {
+                "method": "UNSUBSCRIBE",
+                "params": [stream_name],
+                "id": self._futures_stream_id_counter,
+            }
+            self._futures_stream_id_counter += 1
+            if self._futures_websocket:
+                await self._futures_websocket.send(json.dumps(unsubscribe_msg))
+            await self._close_futures_if_idle()
+            return
+
+        if stream_name in self._subscriptions:
+            del self._subscriptions[stream_name]
+        self._stream_symbol_map.pop(stream_name, None)
+        unsubscribe_msg = {
+            "method": "UNSUBSCRIBE",
+            "params": [stream_name],
+            "id": self._stream_id_counter,
+        }
+        self._stream_id_counter += 1
+        if self._websocket:
+            await self._websocket.send(json.dumps(unsubscribe_msg))
+        await self._close_spot_if_idle()
     
     def get_cached_ticker(self, symbol: str) -> Optional[TickerData]:
         """获取缓存的行情数据"""

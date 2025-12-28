@@ -352,6 +352,26 @@ class BinanceAdapter(ExchangeAdapter):
         except Exception as e:
             self.logger.error(f"❌ 取消订阅失败: {e}")
 
+    async def unsubscribe_ticker(self, symbol: str) -> None:
+        """取消订阅行情数据"""
+        try:
+            await self._websocket.unsubscribe_ticker(symbol)
+            if not hasattr(self, '_stop_polling'):
+                self._stop_polling = set()
+            self._stop_polling.add(symbol)
+        except Exception as e:
+            self.logger.error(f"❌ 取消订阅行情失败 {symbol}: {e}")
+
+    async def unsubscribe_orderbook(self, symbol: str) -> None:
+        """取消订阅订单簿数据"""
+        try:
+            await self._websocket.unsubscribe_orderbook(symbol)
+            if not hasattr(self, '_stop_polling'):
+                self._stop_polling = set()
+            self._stop_polling.add(symbol)
+        except Exception as e:
+            self.logger.error(f"❌ 取消订阅订单簿失败 {symbol}: {e}")
+
     # ==================== 轮询模式实现 ====================
 
     async def _poll_ticker(self, symbol: str, callback: Callable[[TickerData], None]) -> None:
