@@ -194,7 +194,7 @@ def render_monitor_ui_html() -> str:
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
-        "\"": "&quot;",
+        '"': "&quot;",
         "'": "&#39;"
       })[m]);
 

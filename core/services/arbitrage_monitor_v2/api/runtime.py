@@ -295,6 +295,22 @@ class WatchlistManager:
                 logger.exception("watchlist store delete failed")
         return removed
 
+    async def reset_all_ttl(self, ttl_seconds: Optional[int]) -> int:
+        now = time.time()
+        expire_at: Optional[float] = None if ttl_seconds is None else (now + int(ttl_seconds))
+        async with self._lock:
+            for item in self._items.values():
+                item.updated_at = now
+                item.expire_at = expire_at
+            changed = list(self._items.values())
+
+        if self._store is not None:
+            try:
+                await asyncio.to_thread(self._store.upsert_items, changed)
+            except Exception:
+                logger.exception("watchlist store reset ttl failed")
+        return len(changed)
+
     def snapshot(self) -> List[Dict[str, Any]]:
         now = time.time()
         out: List[Dict[str, Any]] = []
@@ -561,6 +577,11 @@ class MonitorApiRuntime:
                 pass
         await self._refresh_symbols_for_analysis()
         return {"symbol": symbol, "removed_pairs": [{"exchange": e, "symbol": s} for e, s in removed]}
+
+    async def reset_watchlist_ttl(self, ttl_seconds: Optional[int]) -> Dict[str, Any]:
+        count = await self.watchlist.reset_all_ttl(ttl_seconds)
+        await self._refresh_symbols_for_analysis()
+        return {"updated": count, "ttl_seconds": ttl_seconds}
 
     async def health(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {

@@ -34,6 +34,10 @@ class WatchRemoveRequest(BaseModel):
     exchanges: Optional[List[str]] = None
 
 
+class WatchResetRequest(BaseModel):
+    ttl_seconds: Optional[int] = Field(default=DEFAULT_WATCHLIST_TTL_SECONDS, ge=60)
+
+
 def _safe_float(v: object, default: float = 0.0) -> float:
     try:
         if v is None:
@@ -237,6 +241,10 @@ def create_app(config_path: Path, enable_ui: bool = False) -> FastAPI:
     @app.post("/watchlist/remove")
     async def remove_watch(req: WatchRemoveRequest) -> Dict[str, Any]:
         return await runtime.remove_watch(symbol=req.symbol, exchanges=req.exchanges)
+
+    @app.post("/watchlist/reset_ttl")
+    async def reset_watchlist_ttl(req: WatchResetRequest) -> Dict[str, Any]:
+        return await runtime.reset_watchlist_ttl(ttl_seconds=req.ttl_seconds)
 
     @app.get("/snapshot")
     async def snapshot(
