@@ -1,0 +1,65 @@
+# ============================================================================
+# 套利监控系统配置 V2（性能/WS-only/15币种 测试用）
+#
+# 说明：
+# - WS-only：只选择“具备 WS 行情能力”的交易所，用于评估 WS 监听健康度
+# - Variational 当前为 REST 询价轮询（且容易触发 403/WAF），因此从该配置中剔除
+# - 该配置从 45 币种子集裁剪为 15 币种，用于观察“进一步降低规模后”的吞吐/延迟变化
+# ============================================================================
+
+exchanges:
+  - edgex
+  - backpack
+  - lighter
+  - paradex
+  - hyperliquid
+  - binance
+  - okx
+  - grvt
+
+symbols:
+  - BTC-USDC-PERP
+  - ETH-USDC-PERP
+  - BNB-USDC-PERP
+  - DOGE-USDC-PERP
+  - AVAX-USDC-PERP
+  - ARB-USDC-PERP
+  - DOT-USDC-PERP
+  - ADA-USDC-PERP
+  - APT-USDC-PERP
+  - DYDX-USDC-PERP
+  - FIL-USDC-PERP
+  - GMX-USDC-PERP
+  - HBAR-USDC-PERP
+  - ICP-USDC-PERP
+  - JUP-USDC-PERP
+
+thresholds:
+  min_spread_pct: 0.1
+  min_funding_rate_diff: 0.01
+
+websocket:
+  ping_interval: 30
+  reconnect_delay: 5
+  max_reconnect_attempts: 5
+
+queues:
+  orderbook_queue_size: 20000
+  ticker_queue_size: 10000
+  analysis_queue_size: 500
+
+performance:
+  analysis_interval_ms: 10
+  ui_refresh_interval_ms: 1000
+
+health_check:
+  interval: 10
+  data_timeout: 30
+
+spread_history:
+  enabled: false
+
+debug_cli:
+  enabled: false
+  interval_seconds: 1.0
+
