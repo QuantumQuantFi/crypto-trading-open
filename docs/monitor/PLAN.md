@@ -86,3 +86,37 @@
 - TRU：仅 Binance 永续有合约；OKX/Hyperliquid/Paradex/GRVT/EdgeX/Lighter 均未发现该合约。
 - GAS：Binance/OKX/Hyperliquid 有合约；EdgeX/Lighter/Paradex/GRVT 未发现。
 - 结论：不是 USDT/USDC 或斜杠/冒号解析问题，属于交易所未上架。
+
+## 8. Binance SOCKS5 代理兼容（REST + WS）
+### 8.1 背景与结论
+- 直连 `api.binance.com` / `fapi.binance.com` 返回 451（public + private 均被拦截）。
+- 通过 SOCKS5 代理后可恢复访问（REST 与 WS 均可用）。
+
+### 8.2 代理配置与依赖
+- 配置项（`config.py`）：
+  - `BINANCE_PROXY_URL`：REST 代理（例如 `socks5h://47.79.224.99:1080`）。
+  - `BINANCE_WS_PROXY_URL`：WS 代理（为空则回退 `BINANCE_PROXY_URL`）。
+- 注意：`config_private.py` 优先级高于环境变量；如果在 `config_private.py` 写了同名字段，会覆盖环境变量。
+- 依赖：
+  - REST（requests）：`pysocks`。
+  - WS（websocket-client）：`python-socks`。
+
+### 8.3 代码改动要点
+- `trading/trade_executor.py`：`_send_request()` 对 Binance URL 自动注入代理（其他交易所直连）。
+- `exchange_connectors.py`：Binance spot/futures WS 通过 SOCKS5 代理连接。
+
+### 8.4 验证方式（实测）
+- 网络验证：
+  - `curl --socks5-hostname 47.79.224.99:1080 https://api.binance.com/api/v3/time` 返回 200。
+- REST 私有验证：
+  - `http://127.0.0.1:4002/api/live_trading/positions?all=1&nonzero=0` 中 `binance` 项无错误。
+  - 或 `get_binance_perp_account()` / `get_binance_spot_account()` 直接返回数据。
+- WS 验证：
+- 通过 SOCKS5 连接 `wss://stream.binance.com:9443/ws/btcusdt@ticker` 可收到消息。
+  - 运行中可观察 `ss -tnp | rg '47.79.224.99:1080'` 有长连接，且不再出现 Binance 451 日志。
+
+## 9. watchlist TTL 与订阅清理（近期变更记录）
+- 新增全量重置 TTL 接口：`POST /watchlist/reset_ttl`（可统一设置/清空过期时间）。
+- 订阅清理补齐：Binance / OKX / EdgeX / GRVT / Hyperliquid（ccxt+native）/ Backpack / Variational 等实现 `unsubscribe_*`，并在无订阅时尝试关闭 WS 连接。
+- 轮询降级停止：Hyperliquid 轮询模式按数据类型可停止（避免取消某类订阅导致其它轮询被误停）。
+- UI 展示补充：页面展示“当前关注的交易所 / 当前关注的币种清单”，便于确认 watchlist 覆盖范围。
